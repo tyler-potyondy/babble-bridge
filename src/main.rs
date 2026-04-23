@@ -62,7 +62,7 @@ fn run() -> Result<()> {
             // (build from source, no prompt).  --prebuilt skips to binary fetch.
             let mode = if args.iter().any(|a| a == "--prebuilt") {
                 InstallMode::FetchPrebuilt
-            } else if args.iter().any(|a| a == "--yes") {
+            } else if args.iter().any(|a| a == "--build-from-source") {
                 InstallMode::BuildFromSource
             } else {
                 prompt_install_mode()?
@@ -71,10 +71,10 @@ fn run() -> Result<()> {
         }
         "run-bsim" => {
             require_linux("run-bsim")?;
-            let Some(sim_id) = args.next() else {
-                return Err("Simulation ID must be provided: xtask run-bsim <SIM_ID>".into());
-            };
-            run_bsim(&sim_id)
+            let args: Vec<String> = args.collect();
+            let nrf_rpc_server = args.iter().any(|a| a == "--nrf-rpc-server");
+            let cgm_peripheral = args.iter().any(|a| a == "--cgm-peripheral");
+            run_bsim(nrf_rpc_server, cgm_peripheral)
         }
         "docker-build" => docker_build(),
         "docker-attach" => docker_attach(),
@@ -87,13 +87,19 @@ fn run() -> Result<()> {
 }
 
 fn print_usage() {
-    println!("Usage:");
-    println!("  cargo xtask docker-build                        Build the dev-container image");
-    println!("  cargo xtask docker-attach                       Open an interactive shell in the container");
-    println!("  cargo xtask zephyr-setup [--clean]              Set up Zephyr/BabbleSim (prompts for install mode)");
-    println!("  cargo xtask zephyr-setup [--clean] --prebuilt   Fetch prebuilt binaries from GitHub Releases");
-    println!("  cargo xtask zephyr-setup [--clean] --yes        Build from source (non-interactive, for CI)");
-    println!("  cargo xtask run-bsim <SIM_ID>                   Run BabbleSim (Linux only)");
+    println!("Usage: cargo xtask <command> [options]");
+    println!();
+    println!("Commands:");
+    println!("  docker-build                      Build the dev-container image");
+    println!("  docker-attach                     Open an interactive shell in the container");
+    println!();
+    println!("  zephyr-setup [--clean]            Set up Zephyr/BabbleSim (prompts for install mode)");
+    println!("    --prebuilt                      Fetch prebuilt binaries from GitHub Releases");
+    println!("    --build-from-source             Build from source (non-interactive, for CI)");
+    println!();
+    println!("  run-bsim                          Run BabbleSim simulation (Linux only)");
+    println!("    --nrf-rpc-server                Launch the nRF RPC server (default: on)");
+    println!("    --cgm-peripheral                Launch the CGM peripheral sample (default: on)");
 }
 
 // ── Install-mode prompt ──────────────────────────────────────────────────────
@@ -514,57 +520,133 @@ fn pkill_sim(sim_id: &str) {
     }
 }
 
-fn run_bsim(sim_id: &str) -> Result<()> {
-    pkill_sim(sim_id);
+fn generate_sim_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let pid = std::process::id();
+    format!("sim_{:08x}", nanos ^ (pid << 16))
+}
+
+/// Run BabbleSim with an auto-generated simulation ID.
+///
+/// Pass `nrf_rpc_server` / `cgm_peripheral` to select which apps to launch.
+/// If neither flag is set both apps run (default behaviour).
+fn run_bsim(nrf_rpc_server: bool, cgm_peripheral: bool) -> Result<()> {
+    // Default: run both apps when no explicit flags are given.
+    let (run_nrf, run_cgm) = if !nrf_rpc_server && !cgm_peripheral {
+        (true, true)
+    } else {
+        (nrf_rpc_server, cgm_peripheral)
+    };
+
+    let sim_id = generate_sim_id();
+    pkill_sim(&sim_id);
 
     let _ = fs::remove_dir_all(format!(
         "/tmp/bs_{}/{}",
         env::var("USER").unwrap_or_default(),
-        sim_id
+        &sim_id
     ));
 
-    println!("Starting BabbleSim PHY simulator...");
+    let device_count = (run_nrf as u32) + (run_cgm as u32);
+
+    const SEP: &str = "────────────────────────────────────────────────────────────";
+
+    println!("  Starting PHY simulator...");
     let _phy = spawn_in_bsim_bin(
-        sim_id,
+        &sim_id,
         "./bs_2G4_phy_v1",
-        &[&format!("-s={sim_id}"), "-D=2", "-sim_length=86400e6"],
+        &[
+            &format!("-s={sim_id}"),
+            &format!("-D={device_count}"),
+            "-sim_length=86400e6",
+        ],
     )?;
 
-    println!("Starting nRF RPC server with BabbleSim...");
-    println!();
-    println!("=== BabbleSim Running ===");
-    println!("Simulation ID: {sim_id}");
-    println!("Simulation length: 86400 seconds (24 hours simulated, ~39 seconds real time at 2200x speed)");
-    println!();
-    println!("To test RX, run in another terminal:");
-    println!("  socat UNIX-LISTEN:/tmp/nrf_rpc_server.sock,fork /dev/pts/XX,raw,echo=0");
-    println!("  printf '\\x04\\x00\\xff\\x00\\xff\\x00\\x62\\x74\\x5f\\x72\\x70\\x63' | socat - UNIX-CONNECT:/tmp/nrf_rpc_server.sock");
-    println!();
-    println!("Starting device (Press Ctrl+C to stop)...");
-    println!();
+    // Device indices are assigned in launch order so the PHY's -D count matches.
+    let nrf_device_idx: u32 = 0;
+    let cgm_device_idx: u32 = run_nrf as u32;
 
-    let mut zephyr = spawn_in_bsim_bin(
-        sim_id,
-        "./zephyr_rpc_server_app",
-        &[&format!("-s={sim_id}"), "-d=0", "-uart0_pty", "-uart_pty_pollT=1000"],
-    )?;
+    let mut nrf_proc = if run_nrf {
+        println!("  Starting nRF RPC server (device {nrf_device_idx})...");
+        Some(spawn_in_bsim_bin(
+            &sim_id,
+            "./zephyr_rpc_server_app",
+            &[
+                &format!("-s={sim_id}"),
+                &format!("-d={nrf_device_idx}"),
+                "-uart0_pty",
+                "-uart_pty_pollT=1000",
+            ],
+        )?)
+    } else {
+        None
+    };
 
-    let cgm_log = fs::File::create("external/tools/bsim/bin/cgm_peripheral_sample.log")?;
-    let mut cgm = Command::new("./cgm_peripheral_sample")
-        .args([&format!("-s={sim_id}"), "-d=1"])
-        .current_dir("external/tools/bsim/bin")
-        .stdin(Stdio::null())
-        .stdout(cgm_log.try_clone()?)
-        .stderr(cgm_log)
-        .env("BSIM_OUT_PATH", "external/tools/bsim")
-        .env("BSIM_COMPONENTS_PATH", "external/tools/bsim/components")
-        .env("LD_LIBRARY_PATH", bsim_ld_library_path())
-        .spawn()?;
+    let mut cgm_proc = if run_cgm {
+        println!("  Starting CGM peripheral (device {cgm_device_idx})...");
+        let cgm_log = fs::File::create("external/tools/bsim/bin/cgm_peripheral_sample.log")?;
+        Some(
+            Command::new("./cgm_peripheral_sample")
+                .args([&format!("-s={sim_id}"), &format!("-d={cgm_device_idx}")])
+                .current_dir("external/tools/bsim/bin")
+                .stdin(Stdio::null())
+                .stdout(cgm_log.try_clone()?)
+                .stderr(cgm_log)
+                .env("BSIM_OUT_PATH", "external/tools/bsim")
+                .env("BSIM_COMPONENTS_PATH", "external/tools/bsim/components")
+                .env("LD_LIBRARY_PATH", bsim_ld_library_path())
+                .spawn()?,
+        )
+    } else {
+        None
+    };
 
-    let zephyr_status = zephyr.wait()?;
-    let _ = cgm.kill();
-    if !zephyr_status.success() {
-        return Err(format!("zephyr_rpc_server_app exited with status: {zephyr_status}").into());
+    // Build a human-readable device list for the status banner.
+    let mut device_list = Vec::new();
+    if run_nrf { device_list.push(format!("nrf-rpc-server [d={nrf_device_idx}]")); }
+    if run_cgm { device_list.push(format!("cgm-peripheral [d={cgm_device_idx}]")); }
+    let device_str = device_list.join(", ");
+
+    println!();
+    println!("{SEP}");
+    println!("  Simulation ID : {sim_id}");
+    println!("  Devices       : {device_str}");
+    println!("  Duration      : 86400 s  (~24 h simulated, ~39 s real time)");
+    println!("{SEP}");
+
+    if run_nrf {
+        println!();
+        println!("  To test RX, run in another terminal:");
+        println!();
+        println!("    socat UNIX-LISTEN:/tmp/nrf_rpc_server.sock,fork /dev/pts/XX,raw,echo=0");
+        println!("    printf '\\x04\\x00\\xff\\x00\\xff\\x00\\x62\\x74\\x5f\\x72\\x70\\x63' \\");
+        println!("      | socat - UNIX-CONNECT:/tmp/nrf_rpc_server.sock");
     }
+
+    println!();
+    println!("  Press Ctrl+C to stop.");
+    println!();
+
+    // Wait on the interactive process (nRF RPC server has the PTY), falling
+    // back to the CGM peripheral if the server was not launched.
+    if let Some(ref mut proc) = nrf_proc {
+        let status = proc.wait()?;
+        if let Some(ref mut cgm) = cgm_proc {
+            let _ = cgm.kill();
+        }
+        if !status.success() {
+            return Err(format!("zephyr_rpc_server_app exited with status: {status}").into());
+        }
+    } else if let Some(ref mut proc) = cgm_proc {
+        let status = proc.wait()?;
+        if !status.success() {
+            return Err(format!("cgm_peripheral_sample exited with status: {status}").into());
+        }
+    }
+
     Ok(())
 }
