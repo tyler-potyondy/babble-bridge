@@ -12,9 +12,6 @@ use std::process::{Child, Command, Stdio};
 type DynError = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, DynError>;
 
-const GITHUB_REPO: &str = "https://github.com/tyler-potyondy/";
-const BSIM_ASSET: &str = "bsim-binaries-linux-x86_64.tar.gz";
-const TEST_APPS_ASSET: &str = "test-app-binaries-linux-x86_64.tar.gz";
 const DOCKER_IMAGE_TAG: &str = "nrf-sim-bridge:latest";
 
 enum InstallMode {
@@ -235,41 +232,8 @@ fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn download_and_extract(asset: &str, extract_dir: &Path, root: &Path) -> Result<()> {
-    let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/latest/download/{asset}"
-    );
-    let archive = extract_dir.join(asset);
-    let archive_str = archive.to_str().ok_or("Archive path contains non-UTF-8 characters")?;
-    let extract_str = extract_dir.to_str().ok_or("Extract path contains non-UTF-8 characters")?;
-
-    println!("Downloading {url} ...");
-    run_cmd(
-        "curl",
-        &["--location", "--fail", "--progress-bar", "--output", archive_str, &url],
-        Some(root),
-    )?;
-
-    println!("Extracting {asset} into {extract_str} ...");
-    run_cmd(
-        "tar",
-        &["--extract", "--gzip", "--file", archive_str, "--directory", extract_str],
-        Some(root),
-    )?;
-
-    fs::remove_file(&archive)?;
-    Ok(())
-}
-
-fn fetch_prebuilt_binaries(root: &Path, external_dir: &Path) -> Result<()> {
-    download_and_extract(BSIM_ASSET, external_dir, root)?;
-
-    let bsim_bin = external_dir.join("tools/bsim/bin");
-    fs::create_dir_all(&bsim_bin)?;
-    download_and_extract(TEST_APPS_ASSET, &bsim_bin, root)?;
-
-    println!("Done. All prebuilt binaries are in external/tools/bsim/");
-    Ok(())
+fn fetch_prebuilt_binaries(_root: &Path, _external_dir: &Path) -> Result<()> {
+    unimplemented!("--prebuilt is not yet implemented; use --build-from-source")
 }
 
 // ── Zephyr setup ─────────────────────────────────────────────────────────────
