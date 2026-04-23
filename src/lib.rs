@@ -1,7 +1,13 @@
-//! Simulation harness library for running BabbleSim + Zephyr nRF RPC server
-//! in-process from Rust integration tests.
+//! BabbleSim + Zephyr nRF RPC simulation bridge.
 //!
-//! # Typical usage
+//! This crate provides two things:
+//!
+//! - **Test harness** ([`spawn_zephyr_rpc_server_with_socat`]) — spawn a full
+//!   BabbleSim simulation from Rust integration tests.
+//! - **xtask CLI** ([`xtask::cli_main`]) — docker, zephyr-setup, and run-bsim
+//!   commands that downstream crates can re-export.
+//!
+//! # Test harness usage
 //!
 //! ```no_run
 //! use std::collections::HashSet;
@@ -17,6 +23,8 @@
 //!     "<inf> nrf_ps_server: Initializing RPC server",
 //! ]));
 //! ```
+
+pub mod xtask;
 
 use std::collections::HashSet;
 use std::env;
