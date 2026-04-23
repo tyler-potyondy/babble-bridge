@@ -3,6 +3,15 @@ name = "nrf-sim-bridge"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Forward all BabbleSim process output to stderr during tests.
+# Usage: cargo test --features sim-log
+sim-log = []
+
+[lib]
+name = "nrf_sim_bridge"
+path = "src/lib.rs"
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
