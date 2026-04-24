@@ -353,7 +353,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
 
     // ── 4. Wait for PTY path ─────────────────────────────────────────────────
     let pty_path = pty_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "timed out waiting for zephyr_rpc_server_app to announce UART PTY path \
