@@ -1,0 +1,58 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (docker + zephyr)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Export runner UID/GID
+        run: |
+          echo "UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "GID=$(id -g)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build docker image via xtask
+        run: cargo xtask docker-build
+
+      - name: Set up Zephyr + BabbleSim (inside container)
+        run: cargo xtask docker-run -- cargo xtask zephyr-setup --build-from-source
+
+      - name: Run cargo test (inside container)
+        run: cargo xtask docker-run -- cargo test --all-features -- --nocapture
+
+      - name: Upload build output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bsim-bin-debug-${{ github.run_id }}
+          path: external/tools/bsim/bin/
+          if-no-files-found: ignore
+          retention-days: 7

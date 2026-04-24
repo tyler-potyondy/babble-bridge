@@ -1,0 +1,124 @@
+name: publish-prebuilt
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Anything that affects the bsim build output
+      - '.devcontainer/**'
+      - '.gitmodules'
+      - 'src/xtask.rs'
+      - 'src/main.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # Required to create GitHub Releases
+
+jobs:
+  publish:
+    name: Build and publish bsim prebuilt release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Export runner UID/GID
+        run: |
+          echo "UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "GID=$(id -g)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build docker image via xtask
+        run: cargo xtask docker-build
+
+      - name: Build Zephyr + BabbleSim (inside container)
+        run: cargo xtask docker-run -- cargo xtask zephyr-setup --build-from-source
+
+      - name: Compute short SHA + release tag
+        id: meta
+        run: |
+          short_sha="$(git rev-parse --short=12 "$GITHUB_SHA")"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "tag=bsim-prebuilt-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Package prebuilt tarball
+        id: pkg
+        run: |
+          set -euo pipefail
+          short_sha="${{ steps.meta.outputs.short_sha }}"
+          out_dir="dist"
+          mkdir -p "${out_dir}"
+
+          # Bundle bin + lib + components: all three are needed at runtime
+          # by `nrf_sim_bridge` (LD_LIBRARY_PATH, BSIM_COMPONENTS_PATH).
+          # Asset name is FIXED (no SHA in filename) so that the
+          # `releases/latest/download/<name>` URL is stable for `xtask --prebuilt`.
+          tarball="${out_dir}/bsim-prebuilt.tar.gz"
+          tar -czf "${tarball}" \
+            -C external/tools/bsim \
+            bin lib components
+
+          # SHA-256 file in the canonical `<hash>  <filename>` format
+          # so it can be verified with `sha256sum -c`.
+          (cd "${out_dir}" && sha256sum bsim-prebuilt.tar.gz > bsim-prebuilt.tar.gz.sha256)
+
+          # BUILD_INFO for traceability (commit, ref, run id, timestamp).
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "short_sha=${short_sha}"
+            echo "ref=${GITHUB_REF}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${out_dir}/BUILD_INFO.txt"
+
+          ls -lh "${out_dir}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: BabbleSim prebuilt (${{ steps.meta.outputs.short_sha }})
+          body: |
+            Prebuilt BabbleSim binaries (`bin/`, `lib/`, `components/`) for
+            commit `${{ github.sha }}`.
+
+            Includes the freshly built `zephyr_rpc_server_app` and
+            `cgm_peripheral_sample` Zephyr applications.
+
+            Fetched automatically by:
+
+                cargo xtask zephyr-setup --prebuilt
+
+            ## Asset URLs
+
+            Stable "latest" URLs:
+            - https://github.com/tyler-potyondy/nrf-sim-bridge/releases/latest/download/bsim-prebuilt.tar.gz
+            - https://github.com/tyler-potyondy/nrf-sim-bridge/releases/latest/download/bsim-prebuilt.tar.gz.sha256
+          make_latest: 'true'
+          fail_on_unmatched_files: true
+          files: |
+            dist/bsim-prebuilt.tar.gz
+            dist/bsim-prebuilt.tar.gz.sha256
+            dist/BUILD_INFO.txt
