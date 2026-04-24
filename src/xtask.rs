@@ -1,7 +1,25 @@
-//! CLI entry point for xtask commands (docker, zephyr-setup, run-bsim).
+//! Xtask commands (docker, zephyr-setup, run-bsim) and programmatic API.
 //!
-//! Downstream crates re-export this via a thin `xtask` binary so that
-//! `cargo xtask <command>` works from their workspace root.
+//! ## CLI usage
+//!
+//! Downstream crates re-export [`cli_main`] via a thin `xtask` binary so
+//! that `cargo xtask <command>` works from their workspace root.
+//!
+//! ## Library / build-script usage
+//!
+//! The heavy-lifting functions are also exposed as a public API so that
+//! another crate's `build.rs` (or any Rust code) can call them directly
+//! without shelling out:
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use nrf_sim_bridge::xtask;
+//!
+//! let root = Path::new("/path/to/workspace");
+//! let external = root.join("external");
+//! xtask::fetch_prebuilt_binaries(&root, &external)
+//!     .expect("failed to fetch BabbleSim binaries");
+//! ```
 
 use std::env;
 use std::fs;
@@ -9,13 +27,19 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-type DynError = Box<dyn std::error::Error>;
-type Result<T> = std::result::Result<T, DynError>;
+/// Boxed error type used by all public functions in this module.
+pub type DynError = Box<dyn std::error::Error>;
+/// Result alias used by all public functions in this module.
+pub type Result<T> = std::result::Result<T, DynError>;
 
 const DOCKER_IMAGE_TAG: &str = "nrf-sim-bridge:latest";
 
-enum InstallMode {
+/// How BabbleSim/Zephyr binaries should be installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMode {
+    /// Build everything from source (~30 min, requires full Zephyr toolchain).
     BuildFromSource,
+    /// Download a prebuilt release archive from GitHub (~30 s).
     FetchPrebuilt,
 }
 
@@ -49,7 +73,8 @@ fn run() -> Result<()> {
             } else {
                 prompt_install_mode()?
             };
-            zephyr_setup(clean, mode)
+            let root = workspace_root()?;
+            zephyr_setup(&root, clean, mode)
         }
         "run-bsim" => {
             require_linux("run-bsim")?;
@@ -224,7 +249,12 @@ fn docker_run(cmd_args: &[&str]) -> Result<()> {
 
 // ── Workspace / utility helpers ──────────────────────────────────────────────
 
-fn workspace_root() -> Result<PathBuf> {
+/// Walk up from the current directory until a `Cargo.toml` is found.
+///
+/// This is the same heuristic the CLI uses; exposed publicly so that
+/// downstream `build.rs` scripts can locate the workspace root without
+/// duplicating the logic.
+pub fn workspace_root() -> Result<PathBuf> {
     let mut dir = env::current_dir()?;
     loop {
         if dir.join("Cargo.toml").exists() {
@@ -283,17 +313,21 @@ const PREBUILT_TARBALL_NAME: &str = "bsim-prebuilt.tar.gz";
 const PREBUILT_SHA256_NAME: &str = "bsim-prebuilt.tar.gz.sha256";
 
 /// Download the latest published prebuilt BabbleSim bundle, verify its
-/// SHA-256, and extract it into `external/tools/bsim/`.
+/// SHA-256, and extract it into `<external_dir>/tools/bsim/`.
 ///
 /// The tarball produced by the publish workflow contains `bin/`, `lib/`, and
 /// `components/` at its root, so extracting into `external/tools/bsim/`
-/// reproduces the exact layout that `cargo xtask zephyr-setup
-/// --build-from-source` would create — without spending ~30 minutes
-/// rebuilding Zephyr/BabbleSim from source.
+/// reproduces the exact layout that [`zephyr_setup`] with
+/// [`InstallMode::BuildFromSource`] would create — without spending ~30
+/// minutes rebuilding Zephyr/BabbleSim from source.
 ///
-/// Requires `curl`, `sha256sum`, and `tar` on PATH (all present in the
+/// `root` is the workspace root (currently unused but reserved for future
+/// path resolution).  `external_dir` is typically `root.join("external")`.
+///
+/// Requires `curl`, `sha256sum`, and `tar` on `PATH` (all present in the
 /// devcontainer).
-fn fetch_prebuilt_binaries(_root: &Path, external_dir: &Path) -> Result<()> {
+pub fn fetch_prebuilt_binaries(root: &Path, external_dir: &Path) -> Result<()> {
+    let _ = root;
     let bsim_dir = external_dir.join("tools/bsim");
     fs::create_dir_all(&bsim_dir)?;
 
@@ -364,8 +398,22 @@ fn fetch_prebuilt_binaries(_root: &Path, external_dir: &Path) -> Result<()> {
 
 // ── Zephyr setup ─────────────────────────────────────────────────────────────
 
-fn zephyr_setup(clean: bool, mode: InstallMode) -> Result<()> {
-    let root = workspace_root()?;
+/// Set up the Zephyr / BabbleSim environment under `root`.
+///
+/// When `clean` is true, everything under `<root>/external/` (except
+/// `.gitignore`) is removed first.  `mode` selects between a full
+/// source build and a fast prebuilt-binary download.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use nrf_sim_bridge::xtask::{self, InstallMode};
+///
+/// let root = xtask::workspace_root().unwrap();
+/// xtask::zephyr_setup(&root, false, InstallMode::FetchPrebuilt).unwrap();
+/// ```
+pub fn zephyr_setup(root: &Path, clean: bool, mode: InstallMode) -> Result<()> {
     let external_dir = root.join("external");
 
     if clean {
@@ -376,7 +424,7 @@ fn zephyr_setup(clean: bool, mode: InstallMode) -> Result<()> {
     fs::create_dir_all(&external_dir)?;
 
     if let InstallMode::FetchPrebuilt = mode {
-        return fetch_prebuilt_binaries(&root, &external_dir);
+        return fetch_prebuilt_binaries(root, &external_dir);
     }
 
     // Initialize the nrf submodule. This is idempotent: a no-op if
@@ -387,7 +435,7 @@ fn zephyr_setup(clean: bool, mode: InstallMode) -> Result<()> {
     run_cmd(
         "git",
         &["submodule", "update", "--init", "external/nrf"],
-        Some(&root),
+        Some(root),
     )?;
 
     let venv_dir = external_dir.join(".venv");

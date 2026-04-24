@@ -1,11 +1,14 @@
 //! BabbleSim + Zephyr nRF RPC simulation bridge.
 //!
-//! This crate provides two things:
+//! This crate provides three things:
 //!
 //! - **Test harness** ([`spawn_zephyr_rpc_server_with_socat`]) — spawn a full
 //!   BabbleSim simulation from Rust integration tests.
 //! - **xtask CLI** ([`xtask::cli_main`]) — docker, zephyr-setup, and run-bsim
 //!   commands that downstream crates can re-export.
+//! - **Programmatic setup API** ([`xtask::fetch_prebuilt_binaries`],
+//!   [`xtask::zephyr_setup`]) — call from a downstream `build.rs` or any
+//!   Rust code without shelling out.
 //!
 //! # Test harness usage
 //!
