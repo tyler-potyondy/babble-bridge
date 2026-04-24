@@ -1,5 +1,5 @@
 {
-  "name": "nrf-rpc",
+  "name": "nrf-sim-bridge",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "..",
