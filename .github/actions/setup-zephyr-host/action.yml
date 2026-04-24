@@ -1,0 +1,82 @@
+name: Set up Zephyr build host (bare metal)
+description: >
+  Install all apt dependencies and the Zephyr SDK needed to run
+  `cargo xtask zephyr-setup --build-from-source` on a bare-metal Ubuntu
+  runner (i.e. without the devcontainer). Mirrors what
+  `.devcontainer/Dockerfile` installs, so the container path and the
+  bare-metal path stay in sync.
+
+inputs:
+  zephyr-sdk-version:
+    description: Zephyr SDK version to install (must match Dockerfile)
+    required: false
+    default: '0.17.4'
+
+runs:
+  using: composite
+  steps:
+    - name: Install apt dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # Mirrors .devcontainer/Dockerfile. Most of these are already on
+        # ubuntu-latest; listing them explicitly defends against image
+        # changes by the GitHub Actions runner team.
+        sudo apt-get install -y --no-install-recommends \
+          git \
+          cmake \
+          ninja-build \
+          gperf \
+          ccache \
+          dfu-util \
+          device-tree-compiler \
+          wget \
+          python3 \
+          python3-dev \
+          python3-pip \
+          python3-venv \
+          make \
+          gcc \
+          gcc-multilib \
+          g++ \
+          g++-multilib \
+          libsdl2-dev \
+          libxml2-dev \
+          xz-utils \
+          file \
+          ca-certificates \
+          curl \
+          socat
+
+    - name: Cache Zephyr SDK
+      id: cache-sdk
+      uses: actions/cache@v4
+      with:
+        path: /opt/zephyr-sdk-${{ inputs.zephyr-sdk-version }}
+        key: zephyr-sdk-${{ runner.os }}-${{ runner.arch }}-${{ inputs.zephyr-sdk-version }}
+
+    - name: Download + extract Zephyr SDK (cache miss)
+      if: steps.cache-sdk.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ver="${{ inputs.zephyr-sdk-version }}"
+        arch="$(uname -m)"
+        url="https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ver}/zephyr-sdk-${ver}_linux-${arch}.tar.xz"
+        tarball="$(mktemp -t zephyr-sdk-XXXXXX.tar.xz)"
+        echo "Downloading ${url}"
+        wget -q "${url}" -O "${tarball}"
+        sudo mkdir -p /opt
+        sudo tar xf "${tarball}" -C /opt
+        rm -f "${tarball}"
+
+    - name: Register Zephyr SDK with CMake
+      shell: bash
+      run: |
+        set -euo pipefail
+        ver="${{ inputs.zephyr-sdk-version }}"
+        # `setup.sh -c` writes to ~/.cmake/packages/, which lives on the
+        # ephemeral runner home — must run every time, even on cache hit.
+        sudo /opt/zephyr-sdk-${ver}/setup.sh -c
+        echo "ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-${ver}" >> "$GITHUB_ENV"

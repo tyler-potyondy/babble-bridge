@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: cargo test (docker + zephyr)
+  bare-metal:
+    name: cargo test (bare metal)
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -23,10 +23,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Export runner UID/GID
-        run: |
-          echo "UID=$(id -u)" >> "$GITHUB_ENV"
-          echo "GID=$(id -g)" >> "$GITHUB_ENV"
+      - name: Set up Zephyr build host
+        uses: ./.github/actions/setup-zephyr-host
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4
@@ -39,16 +37,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build docker image via xtask
-        run: cargo xtask docker-build
+      - name: Build Zephyr + BabbleSim from source
+        run: cargo xtask zephyr-setup --build-from-source
 
-      - name: Set up Zephyr + BabbleSim (inside container)
-        run: cargo xtask docker-run -- cargo xtask zephyr-setup --build-from-source
+      - name: Run cargo test
+        run: cargo test --all-features -- --nocapture
 
-      - name: Run cargo test (inside container)
-        run: cargo xtask docker-run -- cargo test --all-features -- --nocapture
-
-      - name: Upload build output on failure
+      - name: Upload bsim bin on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:

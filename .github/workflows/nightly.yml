@@ -1,0 +1,99 @@
+name: nightly
+
+on:
+  schedule:
+    # 07:00 UTC daily (~midnight Pacific). Runs against the default branch.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bare-metal:
+    name: bare-metal build + cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Zephyr build host
+        uses: ./.github/actions/setup-zephyr-host
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Zephyr + BabbleSim from source
+        run: cargo xtask zephyr-setup --build-from-source
+
+      - name: Run cargo test
+        run: cargo test --all-features -- --nocapture
+
+      - name: Upload bsim bin on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bsim-bin-bare-${{ github.run_id }}
+          path: external/tools/bsim/bin/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  container:
+    name: container build + cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Export runner UID/GID
+        run: |
+          echo "UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "GID=$(id -g)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-container-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-container-
+
+      - name: Build docker image via xtask
+        run: cargo xtask docker-build
+
+      - name: Build Zephyr + BabbleSim (inside container)
+        run: cargo xtask docker-run -- cargo xtask zephyr-setup --build-from-source
+
+      - name: Run cargo test (inside container)
+        run: cargo xtask docker-run -- cargo test --all-features -- --nocapture
+
+      - name: Upload bsim bin on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bsim-bin-container-${{ github.run_id }}
+          path: external/tools/bsim/bin/
+          if-no-files-found: ignore
+          retention-days: 14
