@@ -60,6 +60,19 @@ fn run() -> Result<()> {
         }
         "docker-build" => docker_build(),
         "docker-attach" => docker_attach(),
+        "docker-run" => {
+            let rest: Vec<String> = args.collect();
+            // Allow an optional `--` separator before the command.
+            let cmd_args: Vec<&str> = rest
+                .iter()
+                .skip_while(|a| a.as_str() == "--")
+                .map(String::as_str)
+                .collect();
+            if cmd_args.is_empty() {
+                return Err("docker-run requires a command to run inside the container".into());
+            }
+            docker_run(&cmd_args)
+        }
         "-h" | "--help" | "help" => {
             print_usage();
             Ok(())
@@ -74,6 +87,7 @@ fn print_usage() {
     println!("Commands:");
     println!("  docker-build                      Build the dev-container image");
     println!("  docker-attach                     Open an interactive shell in the container");
+    println!("  docker-run [--] <cmd> [args...]   Run a command non-interactively in the container (for CI)");
     println!();
     println!("  zephyr-setup [--clean]            Set up Zephyr/BabbleSim (prompts for install mode)");
     println!("    --prebuilt                      Fetch prebuilt binaries from GitHub Releases");
@@ -182,6 +196,32 @@ fn docker_attach() -> Result<()> {
     )
 }
 
+/// Run a command non-interactively inside a one-shot container.
+///
+/// Unlike `docker-attach`, this does not allocate a TTY, so it works in CI
+/// environments where stdin is not a terminal. The workspace is bind-mounted
+/// at `/workspace`, so state written by the command (e.g. `external/` setup
+/// output) persists on the host across invocations.
+fn docker_run(cmd_args: &[&str]) -> Result<()> {
+    let root = workspace_root()?;
+    let workspace = root
+        .to_str()
+        .ok_or("Workspace path contains non-UTF-8 characters")?;
+
+    let mount = format!("{workspace}:/workspace");
+    let mut docker_args: Vec<&str> = vec![
+        "run",
+        "--rm",
+        "--platform", "linux/amd64",
+        "-v", &mount,
+        "-w", "/workspace",
+        DOCKER_IMAGE_TAG,
+    ];
+    docker_args.extend_from_slice(cmd_args);
+
+    run_cmd("docker", &docker_args, Some(&root))
+}
+
 // ── Workspace / utility helpers ──────────────────────────────────────────────
 
 fn workspace_root() -> Result<PathBuf> {
@@ -232,8 +272,94 @@ fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn fetch_prebuilt_binaries(_root: &Path, _external_dir: &Path) -> Result<()> {
-    unimplemented!("--prebuilt is not yet implemented; use --build-from-source")
+/// Hardcoded "latest release" URL for the prebuilt BabbleSim bundle.
+///
+/// The asset filenames are FIXED (no SHA in the name), so this URL pattern
+/// resolves to the most recently published release without any GitHub API
+/// calls or authentication. See `.github/workflows/publish.yml`.
+const PREBUILT_RELEASE_URL_BASE: &str =
+    "https://github.com/tyler-potyondy/nrf-sim-bridge/releases/latest/download";
+const PREBUILT_TARBALL_NAME: &str = "bsim-prebuilt.tar.gz";
+const PREBUILT_SHA256_NAME: &str = "bsim-prebuilt.tar.gz.sha256";
+
+/// Download the latest published prebuilt BabbleSim bundle, verify its
+/// SHA-256, and extract it into `external/tools/bsim/`.
+///
+/// The tarball produced by the publish workflow contains `bin/`, `lib/`, and
+/// `components/` at its root, so extracting into `external/tools/bsim/`
+/// reproduces the exact layout that `cargo xtask zephyr-setup
+/// --build-from-source` would create — without spending ~30 minutes
+/// rebuilding Zephyr/BabbleSim from source.
+///
+/// Requires `curl`, `sha256sum`, and `tar` on PATH (all present in the
+/// devcontainer).
+fn fetch_prebuilt_binaries(_root: &Path, external_dir: &Path) -> Result<()> {
+    let bsim_dir = external_dir.join("tools/bsim");
+    fs::create_dir_all(&bsim_dir)?;
+
+    let download_dir = external_dir.join(".prebuilt-download");
+    if download_dir.exists() {
+        fs::remove_dir_all(&download_dir)?;
+    }
+    fs::create_dir_all(&download_dir)?;
+
+    let tarball = download_dir.join(PREBUILT_TARBALL_NAME);
+    let sha_file = download_dir.join(PREBUILT_SHA256_NAME);
+    let tarball_url = format!("{PREBUILT_RELEASE_URL_BASE}/{PREBUILT_TARBALL_NAME}");
+    let sha_url = format!("{PREBUILT_RELEASE_URL_BASE}/{PREBUILT_SHA256_NAME}");
+
+    let tarball_str = tarball.to_str().ok_or("Invalid UTF-8 path for tarball")?;
+    let sha_file_str = sha_file.to_str().ok_or("Invalid UTF-8 path for sha file")?;
+    let bsim_dir_str = bsim_dir.to_str().ok_or("Invalid UTF-8 path for bsim dir")?;
+
+    println!("Downloading {tarball_url} ...");
+    run_cmd(
+        "curl",
+        &["--fail", "--location", "--show-error", "--silent",
+          "--output", tarball_str, &tarball_url],
+        None,
+    )?;
+
+    println!("Downloading {sha_url} ...");
+    run_cmd(
+        "curl",
+        &["--fail", "--location", "--show-error", "--silent",
+          "--output", sha_file_str, &sha_url],
+        None,
+    )?;
+
+    println!("Verifying SHA-256 ...");
+    // `sha256sum -c` matches filenames as written in the .sha256 file
+    // (relative to cwd), so run it from the directory containing both files.
+    run_cmd(
+        "sha256sum",
+        &["--check", "--strict", PREBUILT_SHA256_NAME],
+        Some(&download_dir),
+    )?;
+
+    // Wipe any stale bin/lib/components from a previous setup so we don't
+    // mix files from a partially-extracted older bundle.
+    for sub in ["bin", "lib", "components"] {
+        let p = bsim_dir.join(sub);
+        if p.exists() {
+            fs::remove_dir_all(&p)?;
+        }
+    }
+
+    println!("Extracting into {} ...", bsim_dir.display());
+    run_cmd(
+        "tar",
+        &["-xzf", tarball_str, "-C", bsim_dir_str],
+        None,
+    )?;
+
+    fs::remove_dir_all(&download_dir)?;
+
+    println!("Prebuilt binaries installed to {}", bsim_dir.display());
+    println!("  bin/        — BabbleSim + Zephyr app binaries");
+    println!("  lib/        — shared libraries (LD_LIBRARY_PATH)");
+    println!("  components/ — BabbleSim runtime components");
+    Ok(())
 }
 
 // ── Zephyr setup ─────────────────────────────────────────────────────────────
