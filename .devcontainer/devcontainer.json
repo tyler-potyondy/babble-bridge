@@ -14,7 +14,7 @@
   "runArgs": [
     "--platform=linux/amd64"
   ],
-  "postCreateCommand": "cargo xtask zephyr-setup --yes",
+  "postCreateCommand": "cargo xtask zephyr-setup --prebuilt",
   "customizations": {
     "vscode": {
       "extensions": [
