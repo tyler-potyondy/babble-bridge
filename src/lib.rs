@@ -99,6 +99,31 @@ impl TestProcesses {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+    
+    /// Helper method to dump the current stdout from attached nrf-rpc-server.
+    /// Useful when debugging, but will result in search stdout methods no longer
+    /// functioning (as this will consume stdout).
+    pub fn debug_dump_stdout(&mut self, timeout: Duration) {
+        let start = Instant::now();
+
+        loop {
+            if start.elapsed() >= timeout {
+                return;
+            } 
+            
+            let lines = self.stdout_lines.lock().unwrap();
+            println!(
+                "Captured stdout:\n{}",
+                lines
+                    .iter()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 
     /// Kill all managed child processes immediately. Called automatically on drop.
     pub fn kill_all(&mut self) {
