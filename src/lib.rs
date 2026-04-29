@@ -229,14 +229,16 @@ pub fn spawn_zephyr_rpc_server_with_socat(
 
     let sim_id = test_name;
 
-    // Clean up any leftover socket file from a previous run.
     std::fs::create_dir_all(tests_dir)
         .unwrap_or_else(|e| panic!("could not create tests dir {}: {e}", tests_dir.display()));
     let socket_path = tests_dir.join(format!("{test_name}.sock"));
-    let _ = std::fs::remove_file(&socket_path);
-    // Kill any orphaned processes left by a previous abnormal exit before
-    // spawning fresh ones.
+
+    // Kill orphaned processes FIRST so socat releases its fd on the socket
+    // file before we unlink it.  Without this ordering, remove_file succeeds
+    // on the directory entry but socat keeps an open fd on the inode, and the
+    // new socat fails to bind if the socket is still in use.
     kill_stale_sim_processes(sim_id);
+    let _ = std::fs::remove_file(&socket_path);
 
     // ── 1. PHY ──────────────────────────────────────────────────────────────
     let mut phy = Command::new("./bs_2G4_phy_v1")

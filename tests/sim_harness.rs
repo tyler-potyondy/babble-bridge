@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 // =============================================================================
@@ -132,7 +132,29 @@ impl SimUart {
 // Helper used by every test below (mirrors `run_zephyr_rpc_server_exe`)
 // =============================================================================
 
+/// Remove every `.sock` file from the shared sockets directory once per test
+/// binary run.  This clears any stale files left behind by a previous crashed
+/// or killed run before any test spawns new processes.
+fn once_cleanup_sockets() {
+    static CLEANUP: Once = Once::new();
+    CLEANUP.call_once(|| {
+        let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
+        if let Ok(entries) = std::fs::read_dir(sockets_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map_or(false, |e| e == "sock") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    });
+}
+
 fn start_sim(test_name: &str) -> (TestProcesses, SimUart) {
+    // Purge any stale `.sock` files left by a previous crashed run before
+    // spawning new processes.  The Once guard means this only runs once even
+    // when multiple tests call start_sim concurrently.
+    once_cleanup_sockets();
+
     let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
     let (processes, socket_path) =
         nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(sockets_dir, test_name);
