@@ -182,6 +182,22 @@ where
 /// The function waits up to 10 seconds for `zephyr_rpc_server_app` to print
 /// its PTY path on stdout (`"UART_0 connected to pseudotty: /dev/pts/N"`),
 /// then launches `socat` to bridge that PTY to a UNIX socket at
+/// Kills any leftover BabbleSim processes from a previous run with the given
+/// `sim_id`. Debugger stops and abnormal exits leave orphaned child processes
+/// that hold the sim_id and block the next launch.
+fn kill_stale_sim_processes(sim_id: &str) {
+    let patterns = [
+        format!("bs_2G4_phy_v1.*-s={sim_id}"),
+        format!("zephyr_rpc_server_app.*-s={sim_id}"),
+        format!("cgm_peripheral_sample.*-s={sim_id}"),
+        format!("socat.*{sim_id}.sock"),
+    ];
+    for pat in &patterns {
+        let _ = Command::new("pkill").args(["-f", pat]).status();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+}
+
 /// `tests_dir/<test_name>.sock`.
 ///
 /// # Panics
@@ -218,6 +234,9 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .unwrap_or_else(|e| panic!("could not create tests dir {}: {e}", tests_dir.display()));
     let socket_path = tests_dir.join(format!("{test_name}.sock"));
     let _ = std::fs::remove_file(&socket_path);
+    // Kill any orphaned processes left by a previous abnormal exit before
+    // spawning fresh ones.
+    kill_stale_sim_processes(sim_id);
 
     // ── 1. PHY ──────────────────────────────────────────────────────────────
     let mut phy = Command::new("./bs_2G4_phy_v1")
