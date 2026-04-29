@@ -32,6 +32,7 @@ pub mod xtask;
 use std::collections::HashSet;
 use std::env;
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -254,6 +255,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .env("BSIM_OUT_PATH", bsim_out)
         .env("BSIM_COMPONENTS_PATH", bsim_comp)
         .env("LD_LIBRARY_PATH", &ld_path)
+        .process_group(0)
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn bs_2G4_phy_v1: {e}"));
     if verbose {
@@ -288,6 +290,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .env("BSIM_OUT_PATH", bsim_out)
         .env("BSIM_COMPONENTS_PATH", bsim_comp)
         .env("LD_LIBRARY_PATH", &ld_path)
+        .process_group(0)
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn zephyr_rpc_server_app: {e}"));
 
@@ -346,6 +349,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
             .env("BSIM_OUT_PATH", bsim_out)
             .env("BSIM_COMPONENTS_PATH", bsim_comp)
             .env("LD_LIBRARY_PATH", &ld_path)
+            .process_group(0)
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn cgm_peripheral_sample: {e}"))
     } else {
@@ -364,6 +368,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
             .env("BSIM_OUT_PATH", bsim_out)
             .env("BSIM_COMPONENTS_PATH", bsim_comp)
             .env("LD_LIBRARY_PATH", &ld_path)
+            .process_group(0)
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn cgm_peripheral_sample: {e}"))
     };
@@ -396,6 +401,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .unwrap_or_else(|e| {
             panic!(
