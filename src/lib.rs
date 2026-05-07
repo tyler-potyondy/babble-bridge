@@ -16,7 +16,7 @@
 //! use std::collections::HashSet;
 //! use std::path::Path;
 //!
-//! let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"));
+//! let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
 //! let (mut processes, socket_path) =
 //!     nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
 //!

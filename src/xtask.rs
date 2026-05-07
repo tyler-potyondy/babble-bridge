@@ -24,6 +24,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -89,9 +90,10 @@ fn run() -> Result<()> {
             require_linux("start-sim")?;
             let args: Vec<String> = args.collect();
             let sim_id = parse_sim_flag(&args, "--sim-id").unwrap_or("insulin_pump");
+            let root = workspace_root()?;
             let sim_dir = parse_sim_flag(&args, "--sim-dir")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp/nrf-sim-bridge"));
+                .unwrap_or_else(|| root.join("tests/sockets"));
             cmd_start_sim(sim_id, &sim_dir)
         }
         "stop-sim" => {
@@ -99,6 +101,10 @@ fn run() -> Result<()> {
             let args: Vec<String> = args.collect();
             let sim_id = parse_sim_flag(&args, "--sim-id").unwrap_or("insulin_pump");
             cmd_stop_sim(sim_id)
+        }
+        "clean-sockets" => {
+            let root = workspace_root()?;
+            cmd_clean_sockets(&root)
         }
         "docker-build" => docker_build(),
         "docker-attach" => docker_attach(),
@@ -141,11 +147,13 @@ fn print_usage() {
     println!();
     println!("  start-sim                         Start simulation stack in the background (Linux only)");
     println!("    --sim-id <id>                   Simulation identifier (default: insulin_pump)");
-    println!("    --sim-dir <path>                Directory for the socket file (default: /tmp/nrf-sim-bridge)");
+    println!("    --sim-dir <path>                Directory for the socket file (default: <workspace>/tests/sockets)");
     println!("    Prints the socket path on success.");
     println!();
     println!("  stop-sim                          Stop a running simulation (Linux only)");
     println!("    --sim-id <id>                   Simulation identifier to stop (default: insulin_pump)");
+    println!();
+    println!("  clean-sockets                     Remove all *.sock files from <workspace>/tests/sockets/");
 }
 
 fn require_linux(cmd: &str) -> Result<()> {
@@ -308,6 +316,33 @@ fn run_cmd(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Create `<root>/tests/sockets/` with restricted permissions (0o700).
+///
+/// Refuses to follow an existing symlink at that path to prevent symlink
+/// substitution attacks. Only called when `DEVCONTAINER=1` is set.
+fn create_sockets_dir(root: &Path) -> Result<()> {
+    let sockets_dir = root.join("tests/sockets");
+
+    // Guard against a symlink planted before we run.
+    if sockets_dir.exists() && sockets_dir.symlink_metadata()?.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to use '{}': it is a symlink. \
+             Remove it manually before running zephyr-setup.",
+            sockets_dir.display()
+        )
+        .into());
+    }
+
+    if !sockets_dir.exists() {
+        fs::create_dir_all(&sockets_dir)?;
+        println!("Created {}", sockets_dir.display());
+    }
+
+    // Restrict to owner only so no other local user can connect to sockets here.
+    fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
 fn clean_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -447,6 +482,7 @@ pub fn zephyr_setup(root: &Path, clean: bool, mode: InstallMode) -> Result<()> {
     }
 
     fs::create_dir_all(&external_dir)?;
+    create_sockets_dir(root)?;
 
     if let InstallMode::FetchPrebuilt = mode {
         return fetch_prebuilt_binaries(root, &external_dir);
@@ -672,6 +708,33 @@ fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
 fn cmd_stop_sim(sim_id: &str) -> Result<()> {
     crate::kill_stale_sim_processes(sim_id);
     println!("Stopped simulation '{sim_id}'");
+    Ok(())
+}
+
+/// `cargo xtask clean-sockets` — remove all `*.sock` files from `tests/sockets/`.
+fn cmd_clean_sockets(root: &Path) -> Result<()> {
+    let sockets_dir = root.join("tests/sockets");
+    if !sockets_dir.exists() {
+        println!("Nothing to clean — {} does not exist.", sockets_dir.display());
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&sockets_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("sock") {
+            fs::remove_file(&path)?;
+            println!("Removed {}", path.display());
+            removed += 1;
+        }
+    }
+
+    if removed == 0 {
+        println!("No socket files found in {}.", sockets_dir.display());
+    } else {
+        println!("Removed {removed} socket file(s).");
+    }
     Ok(())
 }
 
