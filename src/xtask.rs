@@ -749,8 +749,13 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
         docker_build()?;
     }
 
-    // Use a well-known container name so we can reuse it across invocations.
-    let container_name = "nrf-sim-bridge-dev";
+    // Derive a container name from the workspace path so each repo gets its
+    // own container with the correct workspace bind-mounted.
+    let container_name = format!(
+        "nrf-sim-bridge-{}",
+        &format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)))[..8]
+    );
+    let container_name = container_name.as_str();
 
     // Check if the container is already running.
     let container_running = Command::new("docker")
@@ -824,7 +829,8 @@ fn cmd_stop_sim(sim_id: &str) -> Result<()> {
 fn cmd_clean_sockets(root: &Path) -> Result<()> {
     let sockets_dir = root.join("tests/sockets");
     if !sockets_dir.exists() {
-        println!("Nothing to clean — {} does not exist.", sockets_dir.display());
+        create_sockets_dir(root)?;
+        println!("No socket files found in {}.", sockets_dir.display());
         return Ok(());
     }
 
