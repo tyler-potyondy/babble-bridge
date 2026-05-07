@@ -194,9 +194,35 @@ pub(crate) fn kill_stale_sim_processes(sim_id: &str) {
         format!("socat.*{sim_id}.sock"),
     ];
     for pat in &patterns {
-        let _ = Command::new("pkill").args(["-f", pat]).status();
+        let _ = Command::new("pkill").args(["-9", "-f", pat]).status();
     }
-    std::thread::sleep(Duration::from_millis(100));
+    // Give processes time to fully exit.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // BabbleSim stores per-sim IPC files under /tmp/bs_<username>/<sim_id>/.
+    // These lock/pipe files must be removed before a new run or the PHY will
+    // hang waiting for coordination on stale file descriptors.
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("bs_") {
+                let sim_dir = entry.path().join(sim_id);
+                if sim_dir.is_dir() {
+                    let _ = std::fs::remove_dir_all(&sim_dir);
+                }
+            }
+        }
+    }
+
+    // Also clean up any POSIX shared memory objects keyed by sim_id.
+    if let Ok(entries) = std::fs::read_dir("/dev/shm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().contains(sim_id) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// `tests_dir/<test_name>.sock`.

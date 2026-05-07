@@ -89,7 +89,7 @@ fn run() -> Result<()> {
         "start-sim" => {
             let args: Vec<String> = args.collect();
             let sim_id = parse_sim_flag(&args, "--sim-id").unwrap_or("sim");
-            let use_docker = args.iter().any(|a| a == "--docker");
+            let use_docker = args.iter().any(|a| a == "--container");
             if use_docker {
                 cmd_start_sim_in_docker(sim_id)
             } else {
@@ -153,7 +153,7 @@ fn print_usage() {
     println!("  start-sim                         Start simulation stack in the background (Linux only)");
     println!("    --sim-id <id>                   Simulation identifier (default: sim)");
     println!("    --sim-dir <path>                Directory for the socket file (default: <workspace>/tests/sockets)");
-    println!("    --docker                        Build image if needed and run inside a container (macOS)");
+    println!("    --container                     Build image if needed and run inside a container (macOS)");
     println!("    Prints the socket path on success.");
     println!();
     println!("  stop-sim                          Stop a running simulation (Linux only)");
@@ -678,9 +678,24 @@ fn parse_sim_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 /// waits until the UNIX socket at `<sim_dir>/<sim_id>.sock` is connectable,
 /// then prints the socket path and exits, leaving all child processes running.
 fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
-    // Delegate all process spawning + PTY discovery + socat bridging to the
-    // shared library function.  It panics on hard failures (binary not found,
-    // PTY timeout), which is acceptable for a CLI command.
+    // Verify required binaries exist before attempting to spawn anything.
+    let bsim_bin = Path::new("external/tools/bsim/bin");
+    let required = ["bs_2G4_phy_v1", "zephyr_rpc_server_app", "cgm_peripheral_sample"];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|name| !bsim_bin.join(name).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Missing required binaries in {}:\n{}\n\
+             Run `cargo xtask zephyr-setup` to install them.",
+            bsim_bin.display(),
+            missing.iter().map(|n| format!("  - {n}")).collect::<Vec<_>>().join("\n"),
+        )
+        .into());
+    }
+
     let (processes, socket_path) =
         crate::spawn_zephyr_rpc_server_with_socat(sim_dir, sim_id);
 
@@ -710,10 +725,10 @@ fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `cargo xtask start-sim --docker` — build the image if needed, then run
-/// `start-sim` inside a container so the Linux-only simulation stack works
-/// from macOS. The workspace is bind-mounted at `/workspace`, so the socket
-/// file appears in `tests/sockets/` on the host as well.
+/// `cargo xtask start-sim --container` — ensure the dev container is running,
+/// then exec `start-sim` inside it so Linux-only sim processes stay alive after
+/// this command returns. The workspace bind-mount means the socket file appears
+/// in `tests/sockets/` on the host as well.
 fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
     let root = workspace_root()?;
     let workspace = root
@@ -734,17 +749,65 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
         docker_build()?;
     }
 
-    let mount = format!("{workspace}:/workspace");
+    // Use a well-known container name so we can reuse it across invocations.
+    let container_name = "nrf-sim-bridge-dev";
+
+    // Check if the container is already running.
+    let container_running = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", container_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
+
+    if !container_running {
+        // Remove any stopped container with the same name before starting fresh.
+        let _ = Command::new("docker")
+            .args(["rm", "-f", container_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        println!("Starting container {container_name}...");
+        let mount = format!("{workspace}:/workspace");
+        run_cmd(
+            "docker",
+            &[
+                "run",
+                "--detach",
+                "--tty",            // required: mounts /dev/pts so openpty() works for Zephyr UART PTY
+                "--name", container_name,
+                "--platform", "linux/amd64",
+                "-v", &mount,
+                "-w", "/workspace",
+                DOCKER_IMAGE_TAG,
+                "sleep", "infinity",  // keep the container alive
+            ],
+            Some(&root),
+        )?;
+    } else {
+        println!("Container {container_name} is already running.");
+    }
+
+    println!("Running start-sim inside container...");
+    // First stop any running sim so BabbleSim's IPC resources (shared memory,
+    // semaphores) are fully released before we try to start fresh ones.
+    let _ = run_cmd(
+        "docker",
+        &[
+            "exec",
+            container_name,
+            "bash", "-lc", &format!("cargo xtask stop-sim --sim-id {sim_id}"),
+        ],
+        Some(&root),
+    );
     run_cmd(
         "docker",
         &[
-            "run",
-            "--rm",
-            "--platform", "linux/amd64",
-            "-v", &mount,
-            "-w", "/workspace",
-            DOCKER_IMAGE_TAG,
-            "cargo", "xtask", "start-sim", "--sim-id", sim_id,
+            "exec",
+            container_name,
+            "bash", "-lc", &format!("cargo xtask start-sim --sim-id {sim_id}"),
         ],
         Some(&root),
     )
