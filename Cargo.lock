@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "nrf-sim-bridge"
-version = "0.1.0"
+name = "babble-bridge"
+version = "0.1.1"

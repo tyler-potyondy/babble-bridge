@@ -1,7 +1,11 @@
 [package]
-name = "nrf-sim-bridge"
-version = "0.1.0"
+name = "babble-bridge"
+version = "0.1.1"
 edition = "2021"
+description = "simulation harness and CLI for BabbleSim/Zephyr RF simulation workflows"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tyler-potyondy/babble-bridge"
+exclude = ["external/", "target/", "tests/sockets/"]
 
 [features]
 # Forward all BabbleSim process output to stderr during tests.
@@ -9,7 +13,7 @@ edition = "2021"
 sim-log = []
 
 [lib]
-name = "nrf_sim_bridge"
+name = "babble_bridge"
 path = "src/lib.rs"
 
 [[bin]]

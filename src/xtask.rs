@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use nrf_sim_bridge::xtask;
+//! use babble_bridge::xtask;
 //!
 //! let root = Path::new("/path/to/workspace");
 //! let external = root.join("external");
@@ -35,7 +35,7 @@ pub type DynError = Box<dyn std::error::Error>;
 /// Result alias used by all public functions in this module.
 pub type Result<T> = std::result::Result<T, DynError>;
 
-const DOCKER_IMAGE_TAG: &str = "nrf-sim-bridge:latest";
+const DOCKER_IMAGE_TAG: &str = "babble-bridge:latest";
 
 /// How BabbleSim/Zephyr binaries should be installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,7 +488,7 @@ pub fn fetch_prebuilt_binaries(root: &Path, external_dir: &Path) -> Result<()> {
 ///
 /// ```no_run
 /// use std::path::Path;
-/// use nrf_sim_bridge::xtask::{self, InstallMode};
+/// use babble_bridge::xtask::{self, InstallMode};
 ///
 /// let root = xtask::workspace_root().unwrap();
 /// xtask::zephyr_setup(&root, false, InstallMode::FetchPrebuilt).unwrap();
@@ -776,7 +776,7 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
     // Derive a container name from the workspace path so each repo gets its
     // own container with the correct workspace bind-mounted.
     let hash = format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)));
-    let container_name = format!("nrf-sim-bridge-{}", &hash[..8]);
+    let container_name = format!("babble-bridge-{}", &hash[..8]);
     let container_name = container_name.as_str();
     let port = container_port(workspace);
     let port_mapping = format!("127.0.0.1:{port}:{port}");
@@ -875,7 +875,7 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
 /// container where the Unix socket is reachable.
 ///
 /// Unlike `docker-run` (which spins up a fresh container), this execs into
-/// the persistent `nrf-sim-bridge-<hash>` container that `start-sim --container`
+/// the persistent `babble-bridge-<hash>` container that `start-sim --container`
 /// created, so it shares the same network namespace and the socket created by
 /// `start-sim` is connectable.
 fn cmd_exec_in_container(cmd_args: &[&str]) -> Result<()> {
@@ -884,7 +884,7 @@ fn cmd_exec_in_container(cmd_args: &[&str]) -> Result<()> {
         .to_str()
         .ok_or("Workspace path contains non-UTF-8 characters")?;
     let hash = format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)));
-    let container_name = format!("nrf-sim-bridge-{}", &hash[..8]);
+    let container_name = format!("babble-bridge-{}", &hash[..8]);
 
     let container_running = Command::new("docker")
         .args(["inspect", "--format", "{{.State.Running}}", &container_name])

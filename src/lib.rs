@@ -18,7 +18,7 @@
 //!
 //! let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
 //! let (mut processes, socket_path) =
-//!     nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
+//!     babble_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
 //!
 //! // … run test logic, write/read via a UnixStream to socket_path …
 //!
@@ -243,7 +243,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
     //   cargo test --features sim-log --test sim_harness
     //
     // Downstream crates add this to their dev-dependency:
-    //   nrf_sim_bridge = { ..., features = ["sim-log"] }
+    //   babble-bridge = { ..., features = ["sim-log"] }
     let verbose = cfg!(feature = "sim-log");
 
     let bsim_bin = Path::new("external/tools/bsim/bin");

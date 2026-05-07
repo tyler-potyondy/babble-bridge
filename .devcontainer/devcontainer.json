@@ -1,5 +1,5 @@
 {
-  "name": "nrf-sim-bridge",
+  "name": "babble-bridge",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "..",

@@ -1,4 +1,4 @@
-# nrf-sim-bridge
+# babble-bridge
 
 BabbleSim + Zephyr nRF RPC simulation bridge. Provides:
 
@@ -19,14 +19,14 @@ Root `Cargo.toml`:
 members = ["your-app", "xtask"]
 
 [workspace.dependencies]
-nrf-sim-bridge = { git = "https://github.com/your-org/nrf-sim-bridge.git" }
+babble-bridge = "0.1.0"
 ```
 
 Your crate's `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-nrf-sim-bridge.workspace = true
+babble-bridge.workspace = true
 ```
 
 ### 2. Create an xtask crate
@@ -44,14 +44,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nrf-sim-bridge.workspace = true
+babble-bridge.workspace = true
 ```
 
 `xtask/src/main.rs`:
 
 ```rust
 fn main() {
-    nrf_sim_bridge::xtask::cli_main();
+    babble_bridge::xtask::cli_main();
 }
 ```
 
@@ -152,7 +152,7 @@ use std::path::Path;
 
 let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
 let (mut processes, socket_path) =
-    nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
+    babble_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
 
 // Connect to socket_path with a UnixStream, run test logic, then:
 processes.search_stdout_for_strings(HashSet::from([
@@ -163,7 +163,7 @@ processes.search_stdout_for_strings(HashSet::from([
 Enable verbose output to see labelled per-process logs during a test run:
 
 ```bash
-cargo test --features nrf-sim-bridge/sim-log
+cargo test --features babble-bridge/sim-log
 ```
 
 Tests require Linux — run them inside the container on macOS:

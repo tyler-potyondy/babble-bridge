@@ -5,3 +5,4 @@ target
 # submodule, so ignore everything in external/ except it.
 external/*
 !external/nrf
+tests/sockets

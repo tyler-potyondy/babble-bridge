@@ -10,7 +10,7 @@
 //!     (built by `cargo xtask zephyr-setup`)
 //!   - `socat` on PATH
 
-use nrf_sim_bridge::TestProcesses;
+use babble_bridge::TestProcesses;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -28,7 +28,7 @@ use std::time::Duration;
 // thread, blocking write, and HDLC-aware read — exactly what MockUart in the
 // old integration_test.rs provided.
 
-/// A UART transport backed by the socat UNIX socket that `nrf_sim_bridge`
+/// A UART transport backed by the socat UNIX socket that `babble-bridge`
 /// creates.  Downstream crates replace the manual `write`/`read` calls below
 /// with their own `AsyncTransport` impl, but the connection setup is identical.
 struct SimUart {
@@ -157,7 +157,7 @@ fn start_sim(test_name: &str) -> (TestProcesses, SimUart) {
 
     let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
     let (processes, socket_path) =
-        nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(sockets_dir, test_name);
+        babble_bridge::spawn_zephyr_rpc_server_with_socat(sockets_dir, test_name);
     let uart = SimUart::connect(&socket_path);
     (processes, uart)
 }
@@ -187,7 +187,7 @@ fn client_can_connect_to_socket() {
 }
 
 // =============================================================================
-// Example: how a downstream crate uses nrf_sim_bridge
+// Example: how a downstream crate uses babble-bridge
 // =============================================================================
 //
 // This test is the self-contained equivalent of what the old integration_test.rs
@@ -210,7 +210,7 @@ fn client_can_connect_to_socket() {
 #[test]
 fn downstream_usage_example() {
     // ── Step 1: spawn the simulation ─────────────────────────────────────────
-    // `start_sim` calls `nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat`,
+    // `start_sim` calls `babble_bridge::spawn_zephyr_rpc_server_with_socat`,
     // waits for the UART PTY to appear, starts socat, and returns a connected
     // `SimUart`.  Everything is cleaned up automatically when `processes` drops.
     let (mut processes, mut uart) = start_sim("downstream_usage_example");
