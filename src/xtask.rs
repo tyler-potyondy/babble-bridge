@@ -87,14 +87,19 @@ fn run() -> Result<()> {
             run_bsim(nrf_rpc_server, cgm_peripheral)
         }
         "start-sim" => {
-            require_linux("start-sim")?;
             let args: Vec<String> = args.collect();
-            let sim_id = parse_sim_flag(&args, "--sim-id").unwrap_or("insulin_pump");
-            let root = workspace_root()?;
-            let sim_dir = parse_sim_flag(&args, "--sim-dir")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.join("tests/sockets"));
-            cmd_start_sim(sim_id, &sim_dir)
+            let sim_id = parse_sim_flag(&args, "--sim-id").unwrap_or("sim");
+            let use_docker = args.iter().any(|a| a == "--docker");
+            if use_docker {
+                cmd_start_sim_in_docker(sim_id)
+            } else {
+                require_linux("start-sim")?;
+                let root = workspace_root()?;
+                let sim_dir = parse_sim_flag(&args, "--sim-dir")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("tests/sockets"));
+                cmd_start_sim(sim_id, &sim_dir)
+            }
         }
         "stop-sim" => {
             require_linux("stop-sim")?;
@@ -146,8 +151,9 @@ fn print_usage() {
     println!("    --cgm-peripheral                Launch the CGM peripheral sample (default: on)");
     println!();
     println!("  start-sim                         Start simulation stack in the background (Linux only)");
-    println!("    --sim-id <id>                   Simulation identifier (default: insulin_pump)");
+    println!("    --sim-id <id>                   Simulation identifier (default: sim)");
     println!("    --sim-dir <path>                Directory for the socket file (default: <workspace>/tests/sockets)");
+    println!("    --docker                        Build image if needed and run inside a container (macOS)");
     println!("    Prints the socket path on success.");
     println!();
     println!("  stop-sim                          Stop a running simulation (Linux only)");
@@ -702,6 +708,46 @@ fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
 
     println!("{}", socket_path.display());
     Ok(())
+}
+
+/// `cargo xtask start-sim --docker` — build the image if needed, then run
+/// `start-sim` inside a container so the Linux-only simulation stack works
+/// from macOS. The workspace is bind-mounted at `/workspace`, so the socket
+/// file appears in `tests/sockets/` on the host as well.
+fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
+    let root = workspace_root()?;
+    let workspace = root
+        .to_str()
+        .ok_or("Workspace path contains non-UTF-8 characters")?;
+
+    // Build the image if it doesn't already exist.
+    let image_exists = Command::new("docker")
+        .args(["image", "inspect", "--format", ".", DOCKER_IMAGE_TAG])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !image_exists {
+        println!("Docker image {DOCKER_IMAGE_TAG} not found — building...");
+        docker_build()?;
+    }
+
+    let mount = format!("{workspace}:/workspace");
+    run_cmd(
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "--platform", "linux/amd64",
+            "-v", &mount,
+            "-w", "/workspace",
+            DOCKER_IMAGE_TAG,
+            "cargo", "xtask", "start-sim", "--sim-id", sim_id,
+        ],
+        Some(&root),
+    )
 }
 
 /// `cargo xtask stop-sim` — kill all processes belonging to a running simulation.
