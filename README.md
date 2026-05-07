@@ -3,11 +3,14 @@
 BabbleSim + Zephyr nRF RPC simulation bridge. Provides:
 
 - **Test harness** — spawn a full BabbleSim simulation from Rust integration tests
-- **xtask CLI** — `docker-build`, `docker-attach`, `zephyr-setup`, `run-bsim`
+- **xtask CLI** — setup, sim lifecycle, and Docker management commands
+- **Programmatic API** — call setup and spawn functions directly from `build.rs` or code
 
-## Using xtask commands from a downstream crate
+---
 
-### 1. Define the dependency once at workspace level
+## Quickstart for downstream crate authors
+
+### 1. Add the dependency
 
 Root `Cargo.toml`:
 
@@ -17,6 +20,13 @@ members = ["your-app", "xtask"]
 
 [workspace.dependencies]
 nrf-sim-bridge = { git = "https://github.com/your-org/nrf-sim-bridge.git" }
+```
+
+Your crate's `Cargo.toml`:
+
+```toml
+[dev-dependencies]
+nrf-sim-bridge.workspace = true
 ```
 
 ### 2. Create an xtask crate
@@ -45,8 +55,6 @@ fn main() {
 }
 ```
 
-### 3. Add the cargo alias
-
 `.cargo/config.toml`:
 
 ```toml
@@ -54,29 +62,89 @@ fn main() {
 xtask = "run -p xtask --"
 ```
 
-### 4. Use it
+---
+
+## Platform setup
+
+### Linux (native or inside a container)
 
 ```bash
-cargo xtask docker-build
-cargo xtask docker-attach
-cargo xtask zephyr-setup --prebuilt
-cargo xtask run-bsim
+cargo xtask zephyr-setup --prebuilt   # download Linux BabbleSim + Zephyr binaries (~30 s)
 ```
 
-All commands run in the context of your workspace root — Docker
-bind-mounts your project, binaries land in your `external/` directory.
+Also creates `tests/sockets/` with restricted permissions (`0700`).
 
-## Test harness
+### macOS
 
-Add to your crate's `Cargo.toml` (inherits the git source from the
-workspace if you set up `[workspace.dependencies]` above):
+BabbleSim only runs on Linux. Use the `--container` flag — it manages a
+persistent Docker container for you:
 
-```toml
-[dev-dependencies]
-nrf-sim-bridge.workspace = true
+```bash
+cargo xtask start-sim --container     # builds image if needed, starts sim in container
 ```
 
-In an integration test:
+On first run per workspace this also runs `zephyr-setup --prebuilt` inside the container
+to fetch Linux binaries.
+
+---
+
+## Simulation lifecycle
+
+| Command | Description |
+|---------|-------------|
+| `cargo xtask start-sim` | Start PHY + Zephyr RPC server + CGM peripheral + socat bridge (Linux only) |
+| `cargo xtask start-sim --container` | Same, but runs inside a managed container (macOS) |
+| `cargo xtask stop-sim` | Kill simulation processes and clean up BabbleSim IPC |
+| `cargo xtask clean-sockets` | Remove all `*.sock` files from `tests/sockets/` |
+
+Options for `start-sim`:
+
+```
+--sim-id <id>     Socket name and BabbleSim identifier (default: sim)
+--sim-dir <path>  Directory for the socket file (default: <workspace>/tests/sockets)
+--container       Build image if needed and run inside a container (macOS)
+```
+
+The socket is created at `tests/sockets/<sim-id>.sock`.
+
+---
+
+## Connecting to the simulation
+
+### From Linux (or inside the container)
+
+```rust
+use std::os::unix::net::UnixStream;
+let socket = UnixStream::connect("tests/sockets/sim.sock")?;
+```
+
+### From macOS
+
+Unix sockets don't cross the OS boundary. `start-sim --container` automatically
+starts a TCP bridge inside the container and publishes it to `127.0.0.1` on your Mac:
+
+```
+TCP bridge ready: connect from macOS at 127.0.0.1:<port>
+```
+
+The port is stable and derived from your workspace path:
+
+```rust
+use std::net::TcpStream;
+let stream = TcpStream::connect("127.0.0.1:<port>")?;
+```
+
+To run code that needs to reach the socket from macOS, use `exec` to run it
+inside the container instead:
+
+```bash
+cargo xtask exec -- cargo test --test my_integration_test
+cargo xtask exec -- cargo run --example my_example
+```
+
+---
+
+## Integration tests
 
 ```rust
 use std::collections::HashSet;
@@ -86,14 +154,35 @@ let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"))
 let (mut processes, socket_path) =
     nrf_sim_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
 
-// Connect to socket_path with a UnixStream, exchange bytes, then:
+// Connect to socket_path with a UnixStream, run test logic, then:
 processes.search_stdout_for_strings(HashSet::from([
     "<inf> nrf_ps_server: Initializing RPC server",
 ]));
 ```
 
-Enable `sim-log` to see labelled process output during tests:
+Enable verbose output to see labelled per-process logs during a test run:
 
 ```bash
 cargo test --features nrf-sim-bridge/sim-log
 ```
+
+Tests require Linux — run them inside the container on macOS:
+
+```bash
+cargo xtask exec -- cargo test --test my_integration_test
+```
+
+---
+
+## Docker commands
+
+| Command | Description |
+|---------|-------------|
+| `cargo xtask docker-build` | Build the dev-container image |
+| `cargo xtask docker-attach` | Open an interactive shell in the container |
+| `cargo xtask docker-run -- <cmd>` | Run a one-off command in a fresh container |
+| `cargo xtask exec -- <cmd>` | Run a command in the persistent sim container |
+
+`docker-run` creates a fresh container each time (no running sim).
+`exec` targets the persistent container started by `start-sim --container`,
+where the simulation socket is reachable.

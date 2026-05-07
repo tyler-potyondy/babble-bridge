@@ -111,6 +111,18 @@ fn run() -> Result<()> {
             let root = workspace_root()?;
             cmd_clean_sockets(&root)
         }
+        "exec" => {
+            let rest: Vec<String> = args.collect();
+            let cmd_args: Vec<&str> = rest
+                .iter()
+                .skip_while(|a| a.as_str() == "--")
+                .map(String::as_str)
+                .collect();
+            if cmd_args.is_empty() {
+                return Err("exec requires a command to run inside the container".into());
+            }
+            cmd_exec_in_container(&cmd_args)
+        }
         "docker-build" => docker_build(),
         "docker-attach" => docker_attach(),
         "docker-run" => {
@@ -160,6 +172,8 @@ fn print_usage() {
     println!("    --sim-id <id>                   Simulation identifier to stop (default: insulin_pump)");
     println!();
     println!("  clean-sockets                     Remove all *.sock files from <workspace>/tests/sockets/");
+    println!();
+    println!("  exec [--] <cmd> [args...]          Run a command inside the sim container (where the socket is reachable)");
 }
 
 fn require_linux(cmd: &str) -> Result<()> {
@@ -725,6 +739,16 @@ fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Derive a stable TCP port in the private range (49152–65535) from the
+/// workspace path. Two different repos will get different ports, avoiding
+/// conflicts when both are running simultaneously.
+fn container_port(workspace: &str) -> u16 {
+    let hash = workspace
+        .bytes()
+        .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
+    49152 + (hash % (65535 - 49152)) as u16
+}
+
 /// `cargo xtask start-sim --container` — ensure the dev container is running,
 /// then exec `start-sim` inside it so Linux-only sim processes stay alive after
 /// this command returns. The workspace bind-mount means the socket file appears
@@ -751,11 +775,11 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
 
     // Derive a container name from the workspace path so each repo gets its
     // own container with the correct workspace bind-mounted.
-    let container_name = format!(
-        "nrf-sim-bridge-{}",
-        &format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)))[..8]
-    );
+    let hash = format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)));
+    let container_name = format!("nrf-sim-bridge-{}", &hash[..8]);
     let container_name = container_name.as_str();
+    let port = container_port(workspace);
+    let port_mapping = format!("127.0.0.1:{port}:{port}");
 
     // Check if the container is already running.
     let container_running = Command::new("docker")
@@ -774,7 +798,7 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
             .stderr(Stdio::null())
             .status();
 
-        println!("Starting container {container_name}...");
+        println!("Starting container {container_name} (TCP bridge port {port})...");
         let mount = format!("{workspace}:/workspace");
         run_cmd(
             "docker",
@@ -784,6 +808,7 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
                 "--tty",            // required: mounts /dev/pts so openpty() works for Zephyr UART PTY
                 "--name", container_name,
                 "--platform", "linux/amd64",
+                "-p", &port_mapping, // TCP bridge: accessible at 127.0.0.1:<port> on macOS
                 "-v", &mount,
                 "-w", "/workspace",
                 DOCKER_IMAGE_TAG,
@@ -807,6 +832,16 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
         ],
         Some(&root),
     );
+    // Kill any previous TCP bridge for this sim.
+    let _ = run_cmd(
+        "docker",
+        &[
+            "exec",
+            container_name,
+            "bash", "-lc", &format!("pkill -f 'socat TCP-LISTEN:{port}' || true"),
+        ],
+        Some(&root),
+    );
     run_cmd(
         "docker",
         &[
@@ -814,6 +849,62 @@ fn cmd_start_sim_in_docker(sim_id: &str) -> Result<()> {
             container_name,
             "bash", "-lc", &format!("cargo xtask start-sim --sim-id {sim_id}"),
         ],
+        Some(&root),
+    )?;
+
+    // Launch a socat TCP bridge inside the container so the socket is
+    // reachable from macOS at 127.0.0.1:<port>.
+    let socket_path = format!("/workspace/tests/sockets/{sim_id}.sock");
+    run_cmd(
+        "docker",
+        &[
+            "exec",
+            "--detach",
+            container_name,
+            "bash", "-lc",
+            &format!("socat TCP-LISTEN:{port},reuseaddr,fork UNIX-CLIENT:{socket_path}"),
+        ],
+        Some(&root),
+    )?;
+
+    println!("TCP bridge ready: connect from macOS at 127.0.0.1:{port}");
+    Ok(())
+}
+
+/// `cargo xtask exec` — run an arbitrary command inside the existing sim
+/// container where the Unix socket is reachable.
+///
+/// Unlike `docker-run` (which spins up a fresh container), this execs into
+/// the persistent `nrf-sim-bridge-<hash>` container that `start-sim --container`
+/// created, so it shares the same network namespace and the socket created by
+/// `start-sim` is connectable.
+fn cmd_exec_in_container(cmd_args: &[&str]) -> Result<()> {
+    let root = workspace_root()?;
+    let workspace = root
+        .to_str()
+        .ok_or("Workspace path contains non-UTF-8 characters")?;
+    let hash = format!("{:x}", workspace.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)));
+    let container_name = format!("nrf-sim-bridge-{}", &hash[..8]);
+
+    let container_running = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", &container_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
+
+    if !container_running {
+        return Err(format!(
+            "Container {container_name} is not running. \
+             Start it first with `cargo xtask start-sim --container`."
+        ).into());
+    }
+
+    let shell_cmd = cmd_args.join(" ");
+    run_cmd(
+        "docker",
+        &["exec", &container_name, "bash", "-lc", &shell_cmd],
         Some(&root),
     )
 }
