@@ -36,6 +36,8 @@ pub type DynError = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, DynError>;
 
 const DOCKER_IMAGE_TAG: &str = "babble-bridge:latest";
+const DEFAULT_NRF_REPO: &str = "https://github.com/PLSysSec/sdk-nrf/";
+const DEFAULT_NRF_REF: &str = "cgm-bsim";
 
 /// How BabbleSim/Zephyr binaries should be installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +384,16 @@ fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ensure `external/nrf` is available for source builds.
+///
+/// Resolution order:
+/// 1. Use an existing `external/nrf` checkout if present.
+/// 2. If `.gitmodules` declares any submodule whose `path = external/nrf`,
+///    initialize it via `git submodule update --init external/nrf`.
+/// 3. Otherwise clone into `external/nrf`.
+///    - If `BABBLE_BRIDGE_NRF_REPO` is set, use it.
+///    - Else use the canonical sdk-nrf URL used by this project.
+///    Optionally check out `BABBLE_BRIDGE_NRF_REF` when it is set.
 fn ensure_external_nrf_checkout(root: &Path, external_dir: &Path) -> Result<()> {
     let nrf_dir = external_dir.join("nrf");
     if nrf_dir.exists() {
@@ -406,28 +418,57 @@ fn ensure_external_nrf_checkout(root: &Path, external_dir: &Path) -> Result<()> 
         return Ok(());
     }
 
-    let repo = env::var("BABBLE_BRIDGE_NRF_REPO").map_err(|_| {
-        "No external/nrf checkout found and no submodule metadata for external/nrf in .gitmodules. \
-Set BABBLE_BRIDGE_NRF_REPO (and optionally BABBLE_BRIDGE_NRF_REF) so babble-bridge can clone sdk-nrf into external/nrf."
-    })?;
+    let repo = env::var("BABBLE_BRIDGE_NRF_REPO")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_NRF_REPO.to_string());
 
-    println!("Cloning nrf into external/nrf from BABBLE_BRIDGE_NRF_REPO...");
+    println!("Cloning nrf into external/nrf from {repo}...");
     run_cmd("git", &["clone", &repo, "external/nrf"], Some(root))?;
-
-    if let Ok(nrf_ref) = env::var("BABBLE_BRIDGE_NRF_REF") {
-        if !nrf_ref.trim().is_empty() {
-            println!("Checking out BABBLE_BRIDGE_NRF_REF={nrf_ref}...");
-            run_cmd(
-                "git",
-                &["-C", "external/nrf", "checkout", nrf_ref.trim()],
-                Some(root),
-            )?;
-        }
-    }
 
     Ok(())
 }
 
+/// Return the nrf ref to use for source builds.
+///
+/// `BABBLE_BRIDGE_NRF_REF` overrides the default when set and non-empty.
+fn desired_nrf_ref() -> String {
+    env::var("BABBLE_BRIDGE_NRF_REF")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_NRF_REF.to_string())
+}
+
+/// Check out `external/nrf` to `nrf_ref`, fetching it from `origin` when needed.
+fn checkout_nrf_ref(external_dir: &Path, nrf_ref: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["-C", "nrf", "checkout", nrf_ref])
+        .current_dir(external_dir)
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+
+    run_cmd(
+        "git",
+        &["-C", "nrf", "fetch", "origin", nrf_ref],
+        Some(external_dir),
+    )?;
+    run_cmd(
+        "git",
+        &["-C", "nrf", "checkout", "-B", nrf_ref, "FETCH_HEAD"],
+        Some(external_dir),
+    )?;
+    Ok(())
+}
+
+/// Return true when `.gitmodules` declares a submodule with
+/// `path = external/nrf`.
+///
+/// The submodule section name can vary (for example,
+/// `submodule."nrf"` or `submodule."external/nrf"`), so this scans all
+/// `submodule.*.path` entries and matches by value.
 fn gitmodules_declares_external_nrf(root: &Path) -> Result<bool> {
     let gitmodules = root.join(".gitmodules");
     if !gitmodules.exists() {
@@ -439,8 +480,8 @@ fn gitmodules_declares_external_nrf(root: &Path) -> Result<bool> {
             "config",
             "-f",
             ".gitmodules",
-            "--get",
-            "submodule.external/nrf.path",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
         ])
         .current_dir(root)
         .output()?;
@@ -449,7 +490,13 @@ fn gitmodules_declares_external_nrf(root: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    Ok(String::from_utf8(output.stdout)?.trim() == "external/nrf")
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .map(|value| value == "external/nrf")
+            .unwrap_or(false)
+    }))
 }
 
 /// Hardcoded "latest release" URL for the prebuilt BabbleSim bundle.
@@ -580,6 +627,10 @@ pub fn zephyr_setup(root: &Path, clean: bool, mode: InstallMode) -> Result<()> {
 
     ensure_external_nrf_checkout(root, &external_dir)?;
 
+    let nrf_ref = desired_nrf_ref();
+    println!("Checking out nrf ref '{nrf_ref}' before west init...");
+    checkout_nrf_ref(&external_dir, &nrf_ref)?;
+
     let venv_dir = external_dir.join(".venv");
     let venv_python = venv_dir.join("bin/python3");
     let venv_stamp = venv_dir.join(".requirements_installed");
@@ -680,27 +731,6 @@ pub fn zephyr_setup(root: &Path, clean: bool, mode: InstallMode) -> Result<()> {
         &["-C", "tools/bsim", "everything", "-j", "4"],
         Some(&external_dir),
     )?;
-
-    println!("Checking out cgm-bsim branch in nrf...");
-    let current_branch = Command::new("git")
-        .args(["-C", "nrf", "rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&external_dir)
-        .output()?;
-    if !current_branch.status.success() {
-        return Err("Failed to read current nrf branch".into());
-    }
-    if String::from_utf8(current_branch.stdout)?.trim() != "cgm-bsim" {
-        run_cmd(
-            "git",
-            &["-C", "nrf", "fetch", "origin", "cgm-bsim"],
-            Some(&external_dir),
-        )?;
-        run_cmd(
-            "git",
-            &["-C", "nrf", "checkout", "-B", "cgm-bsim", "FETCH_HEAD"],
-            Some(&external_dir),
-        )?;
-    }
 
     println!("Building Zephyr server app...");
     run_cmd(
