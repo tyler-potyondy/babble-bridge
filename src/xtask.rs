@@ -382,6 +382,76 @@ fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_external_nrf_checkout(root: &Path, external_dir: &Path) -> Result<()> {
+    let nrf_dir = external_dir.join("nrf");
+    if nrf_dir.exists() {
+        if nrf_dir.is_dir() {
+            println!("Using existing {}", nrf_dir.display());
+            return Ok(());
+        }
+        return Err(format!(
+            "Expected '{}' to be a directory, but it is not. Remove it and re-run setup.",
+            nrf_dir.display()
+        )
+        .into());
+    }
+
+    if gitmodules_declares_external_nrf(root)? {
+        println!("Setting up nrf submodule...");
+        run_cmd(
+            "git",
+            &["submodule", "update", "--init", "external/nrf"],
+            Some(root),
+        )?;
+        return Ok(());
+    }
+
+    let repo = env::var("BABBLE_BRIDGE_NRF_REPO").map_err(|_| {
+        "No external/nrf checkout found and no submodule metadata for external/nrf in .gitmodules. \
+Set BABBLE_BRIDGE_NRF_REPO (and optionally BABBLE_BRIDGE_NRF_REF) so babble-bridge can clone sdk-nrf into external/nrf."
+    })?;
+
+    println!("Cloning nrf into external/nrf from BABBLE_BRIDGE_NRF_REPO...");
+    run_cmd("git", &["clone", &repo, "external/nrf"], Some(root))?;
+
+    if let Ok(nrf_ref) = env::var("BABBLE_BRIDGE_NRF_REF") {
+        if !nrf_ref.trim().is_empty() {
+            println!("Checking out BABBLE_BRIDGE_NRF_REF={nrf_ref}...");
+            run_cmd(
+                "git",
+                &["-C", "external/nrf", "checkout", nrf_ref.trim()],
+                Some(root),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn gitmodules_declares_external_nrf(root: &Path) -> Result<bool> {
+    let gitmodules = root.join(".gitmodules");
+    if !gitmodules.exists() {
+        return Ok(false);
+    }
+
+    let output = Command::new("git")
+        .args([
+            "config",
+            "-f",
+            ".gitmodules",
+            "--get",
+            "submodule.external/nrf.path",
+        ])
+        .current_dir(root)
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim() == "external/nrf")
+}
+
 /// Hardcoded "latest release" URL for the prebuilt BabbleSim bundle.
 ///
 /// The asset filenames are FIXED (no SHA in the name), so this URL pattern
@@ -508,16 +578,7 @@ pub fn zephyr_setup(root: &Path, clean: bool, mode: InstallMode) -> Result<()> {
         return fetch_prebuilt_binaries(root, &external_dir);
     }
 
-    // Initialize the nrf submodule. This is idempotent: a no-op if
-    // already initialized, otherwise clones it. In CI, `actions/checkout`
-    // with `submodules: recursive` already populates it, in which case
-    // this call just verifies the SHA matches.
-    println!("Setting up nrf submodule...");
-    run_cmd(
-        "git",
-        &["submodule", "update", "--init", "external/nrf"],
-        Some(root),
-    )?;
+    ensure_external_nrf_checkout(root, &external_dir)?;
 
     let venv_dir = external_dir.join(".venv");
     let venv_python = venv_dir.join("bin/python3");
