@@ -1,6 +1,6 @@
 [package]
 name = "babble-bridge"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "simulation harness and CLI for BabbleSim/Zephyr RF simulation workflows"
 license = "MIT OR Apache-2.0"
@@ -8,9 +8,13 @@ repository = "https://github.com/tyler-potyondy/babble-bridge"
 exclude = ["external/", "target/", "tests/sockets/"]
 
 [features]
-# Forward all BabbleSim process output to stderr during tests.
-# Usage: cargo test --features sim-log
+# No-op feature kept for backwards Cargo compatibility.
+# Downstream crates that had `features = ["sim-log"]` won't get a Cargo error,
+# but should migrate to passing `LogOutput::Stream` to spawn_zephyr_rpc_server_with_socat.
 sim-log = []
+
+[dev-dependencies]
+tempfile = "3" # using tempfile crate to make cleanup of log files easier.
 
 [lib]
 name = "babble_bridge"

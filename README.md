@@ -19,7 +19,7 @@ Root `Cargo.toml`:
 members = ["your-app", "xtask"]
 
 [workspace.dependencies]
-babble-bridge = "0.1.0"
+babble-bridge = "0.1.3"
 ```
 
 Your crate's `Cargo.toml`:
@@ -100,10 +100,14 @@ to fetch Linux binaries.
 Options for `start-sim`:
 
 ```
---sim-id <id>     Socket name and BabbleSim identifier (default: sim)
---sim-dir <path>  Directory for the socket file (default: <workspace>/tests/sockets)
---container       Build image if needed and run inside a container (macOS)
+--sim-id <id>       Socket name and BabbleSim identifier (default: sim)
+--sim-dir <path>    Directory for the socket file (default: <workspace>/tests/sockets)
+--container         Build image if needed and run inside a container (macOS)
+--log-stream        Stream all process output to the terminal with [label] prefixes
+--log-dir <path>    Write rpc-server.log, cgm.log, phy.log into <path> (truncated each run)
 ```
+
+`--log-stream` and `--log-dir` can be combined to stream and write files simultaneously.
 
 The socket is created at `tests/sockets/<sim-id>.sock`.
 
@@ -149,10 +153,11 @@ cargo xtask exec -- cargo run --example my_example
 ```rust
 use std::collections::HashSet;
 use std::path::Path;
+use babble_bridge::LogOutput;
 
 let tests_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
 let (mut processes, socket_path) =
-    babble_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test");
+    babble_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test", LogOutput::Off);
 
 // Connect to socket_path with a UnixStream, run test logic, then:
 processes.search_stdout_for_strings(HashSet::from([
@@ -160,11 +165,27 @@ processes.search_stdout_for_strings(HashSet::from([
 ]));
 ```
 
-Enable verbose output to see labelled per-process logs during a test run:
+### LogOutput — controlling where process logs go
 
-```bash
-cargo test --features babble-bridge/sim-log
+| Variant | Behaviour |
+|---|---|
+| `LogOutput::Off` | Silent — no forwarding (default) |
+| `LogOutput::Stream` | Real-time `[label]` prefixed output to terminal (bypasses `cargo test` capture) |
+| `LogOutput::WriteToDir(path)` | Writes `rpc-server.log`, `cgm.log`, `phy.log` into `path`; **files are truncated on every spawn** |
+| `LogOutput::Both(path)` | Streams to terminal AND writes to files simultaneously |
+
+```rust
+// Verbose during interactive debugging:
+babble_bridge::spawn_zephyr_rpc_server_with_socat(tests_dir, "my_test", LogOutput::Stream);
+
+// Persistent log files, cleared on each run:
+babble_bridge::spawn_zephyr_rpc_server_with_socat(
+    tests_dir, "my_test",
+    LogOutput::WriteToDir("tests/sockets/logs".into()),
+);
 ```
+
+> **Note:** `features = ["sim-log"]` is now a no-op. Replace it with `LogOutput::Stream` at the call site.
 
 Tests require Linux — run them inside the container on macOS:
 

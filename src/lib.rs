@@ -40,6 +40,34 @@ use std::time::{Duration, Instant};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
+/// Controls where the simulation process output (stdout/stderr) is forwarded
+/// when [`spawn_zephyr_rpc_server_with_socat`] is called.
+///
+/// # Variants
+///
+/// - `Off` — no forwarding; processes write to `/dev/null` or an internal
+///   buffer used only for [`TestProcesses::search_stdout_for_strings`].
+/// - `Stream` — forward all output to the caller's terminal in real time,
+///   labelled per process (e.g. `[rpc-server] …`).  Output goes to
+///   `/dev/stderr` directly so it bypasses `cargo test` capture.
+/// - `WriteToDir(path)` — write each process's output to a log file under
+///   `path` (`rpc-server.log`, `cgm.log`, `phy.log`).  The directory is
+///   created if it does not exist, and each log file is **truncated** at the
+///   start of every spawn so that stale output from a previous run is cleared.
+/// - `Both(path)` — stream to the terminal AND write to files simultaneously.
+#[derive(Clone, Debug)]
+pub enum LogOutput {
+    /// No forwarding (default, silent).
+    Off,
+    /// Stream all process output to the terminal with `[label]` prefixes.
+    Stream,
+    /// Write each process's output to `<path>/{rpc-server,cgm,phy}.log`.
+    /// Log files are truncated on every spawn.
+    WriteToDir(PathBuf),
+    /// Stream to terminal AND write to files under `path`.
+    Both(PathBuf),
+}
+
 /// Owns all child processes spawned for a single simulation run and
 /// accumulates their stdout output for later inspection.
 ///
@@ -172,6 +200,28 @@ where
     });
 }
 
+/// Spawn a background thread that drains `stream` line by line and appends
+/// each line to the file at `path`.  The file must already exist (caller
+/// creates/truncates it before spawning child processes).
+fn pipe_to_file<R>(stream: R, path: PathBuf)
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("pipe_to_file: could not open {}: {e}", path.display()));
+        let reader = BufReader::new(stream);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                let _ = writeln!(file, "{line}");
+            }
+        }
+    });
+}
+
 // ── Public function ───────────────────────────────────────────────────────────
 
 /// Spawns the full BabbleSim simulation stack for a single test:
@@ -234,17 +284,24 @@ pub(crate) fn kill_stale_sim_processes(sim_id: &str) {
 pub fn spawn_zephyr_rpc_server_with_socat(
     tests_dir: &Path,
     test_name: &str,
+    log: LogOutput,
 ) -> (TestProcesses, PathBuf) {
-    // When the `sim-log` feature is enabled, each process's output is forwarded
-    // to the caller's stderr with a labelled prefix so it appears in the
-    // terminal even under `cargo test` (which captures stdout but not stderr).
-    // Usage:
-    //
-    //   cargo test --features sim-log --test sim_harness
-    //
-    // Downstream crates add this to their dev-dependency:
-    //   babble-bridge = { ..., features = ["sim-log"] }
-    let verbose = cfg!(feature = "sim-log");
+    let verbose = matches!(log, LogOutput::Stream | LogOutput::Both(_));
+    let log_dir: Option<PathBuf> = match &log {
+        LogOutput::WriteToDir(p) | LogOutput::Both(p) => Some(p.clone()),
+        _ => None,
+    };
+
+    // If a log directory was requested, create it and truncate each log file
+    // so output from the previous run is cleared before any process spawns.
+    if let Some(ref dir) = log_dir {
+        std::fs::create_dir_all(dir)
+            .unwrap_or_else(|e| panic!("could not create log dir {}: {e}", dir.display()));
+        for name in &["phy.log", "rpc-server.log", "cgm.log"] {
+            std::fs::File::create(dir.join(name))
+                .unwrap_or_else(|e| panic!("could not create log file {name}: {e}"));
+        }
+    }
 
     let bsim_bin = Path::new("external/tools/bsim/bin");
     let bsim_out = "external/tools/bsim";
@@ -268,6 +325,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
     let _ = std::fs::remove_file(&socket_path);
 
     // ── 1. PHY ──────────────────────────────────────────────────────────────
+    let needs_phy_pipe = verbose || log_dir.is_some();
     let mut phy = Command::new("./bs_2G4_phy_v1")
         .args([
             &format!("-s={sim_id}"),
@@ -277,22 +335,24 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .current_dir(bsim_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(if verbose { Stdio::piped() } else { Stdio::null() })
+        .stderr(if needs_phy_pipe { Stdio::piped() } else { Stdio::null() })
         .env("BSIM_OUT_PATH", bsim_out)
         .env("BSIM_COMPONENTS_PATH", bsim_comp)
         .env("LD_LIBRARY_PATH", &ld_path)
         .process_group(0)
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn bs_2G4_phy_v1: {e}"));
-    if verbose {
-        if let Some(s) = phy.stderr.take() { pipe_labeled(s, "babblesim-phy"); }
+    if let Some(stderr) = phy.stderr.take() {
+        if verbose { pipe_labeled(stderr, "babblesim-phy"); }
+        else if let Some(ref dir) = log_dir { pipe_to_file(stderr, dir.join("phy.log")); }
     }
 
     // ── 2. Zephyr RPC server (stdout always piped for PTY discovery + log capture) ──
     //
-    // stdout must stay piped regardless of verbose mode so the PTY path can
+    // stdout must stay piped regardless of log mode so the PTY path can
     // be extracted.  When verbose, the reader thread additionally forwards
-    // every line to stderr with a "[zephyr]" prefix.
+    // every line to stderr with a "[rpc-server]" prefix.  When writing to a
+    // dir, the reader thread also writes every line to rpc-server.log.
     let stdout_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let (pty_tx, pty_rx) = std::sync::mpsc::channel::<PathBuf>();
 
@@ -301,6 +361,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
     // Without it, isatty() returns 0 on a pipe and colors are stripped.
     let zephyr_color_arg: &[&str] = if verbose { &["-force-color"] } else { &[] };
 
+    let needs_zephyr_stderr = verbose || log_dir.is_some();
     let mut zephyr_proc = Command::new("./zephyr_rpc_server_app")
         .args([
             &format!("-s={sim_id}"),
@@ -312,7 +373,7 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .current_dir(bsim_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(if verbose { Stdio::piped() } else { Stdio::null() })
+        .stderr(if needs_zephyr_stderr { Stdio::piped() } else { Stdio::null() })
         .env("BSIM_OUT_PATH", bsim_out)
         .env("BSIM_COMPONENTS_PATH", bsim_comp)
         .env("LD_LIBRARY_PATH", &ld_path)
@@ -320,17 +381,20 @@ pub fn spawn_zephyr_rpc_server_with_socat(
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn zephyr_rpc_server_app: {e}"));
 
-    // Drain Zephyr stderr (kernel/driver logs) with label when verbose.
-    if verbose {
-        if let Some(s) = zephyr_proc.stderr.take() { pipe_labeled(s, "rpc-server"); }
+    // Drain Zephyr stderr (kernel/driver logs).
+    if let Some(stderr) = zephyr_proc.stderr.take() {
+        if verbose { pipe_labeled(stderr, "rpc-server"); }
+        else if let Some(ref dir) = log_dir { pipe_to_file(stderr, dir.join("rpc-server.log")); }
     }
 
     // Drain Zephyr stdout in a background thread:
     // - send the PTY path once via `pty_tx` when the "pseudotty" line appears
     // - append every line to the shared `stdout_lines` buffer
     // - when verbose, also forward each line to stderr with a "[rpc-server]" prefix
+    // - when writing to dir, also write every line to rpc-server.log
     let zephyr_stdout = zephyr_proc.stdout.take().expect("stdout was piped");
     let stdout_lines_clone = Arc::clone(&stdout_lines);
+    let rpc_log_path = log_dir.as_ref().map(|d| d.join("rpc-server.log"));
     std::thread::spawn(move || {
         use std::io::Write;
         // Same /dev/stderr trick as pipe_labeled — bypasses cargo test capture.
@@ -339,6 +403,12 @@ pub fn spawn_zephyr_rpc_server_with_socat(
                 .write(true)
                 .open("/dev/stderr")
                 .expect("open /dev/stderr")
+        });
+        let mut log_file = rpc_log_path.as_ref().map(|p| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(p)
+                .unwrap_or_else(|e| panic!("could not open rpc-server.log: {e}"))
         });
         let reader = BufReader::new(zephyr_stdout);
         let mut pty_sent = false;
@@ -360,12 +430,18 @@ pub fn spawn_zephyr_rpc_server_with_socat(
             if let Some(ref mut out) = real_stderr {
                 let _ = writeln!(out, "[rpc-server] {line}");
             }
+            if let Some(ref mut f) = log_file {
+                let _ = writeln!(f, "{line}");
+            }
             stdout_lines_clone.lock().unwrap().push(line);
         }
     });
 
     // ── 3. CGM peripheral ────────────────────────────────────────────────────
-    let mut cgm = if verbose {
+    // When verbose or writing to a log dir, pipe stdout/stderr so we can
+    // forward them.  Otherwise redirect to a local fallback log file (old
+    // behaviour) so the process doesn't block writing to a closed pipe.
+    let mut cgm = if verbose || log_dir.is_some() {
         Command::new("./cgm_peripheral_sample")
             .args([&format!("-s={sim_id}"), "-d=1"])
             .current_dir(bsim_bin)
@@ -398,9 +474,14 @@ pub fn spawn_zephyr_rpc_server_with_socat(
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn cgm_peripheral_sample: {e}"))
     };
-    if verbose {
-        if let Some(s) = cgm.stdout.take() { pipe_labeled(s, "cgm"); }
-        if let Some(s) = cgm.stderr.take() { pipe_labeled(s, "cgm"); }
+    if let (Some(stdout), Some(stderr)) = (cgm.stdout.take(), cgm.stderr.take()) {
+        if verbose {
+            pipe_labeled(stdout, "cgm");
+            pipe_labeled(stderr, "cgm");
+        } else if let Some(ref dir) = log_dir {
+            pipe_to_file(stdout, dir.join("cgm.log"));
+            pipe_to_file(stderr, dir.join("cgm.log"));
+        }
     }
 
     // ── 4. Wait for PTY path ─────────────────────────────────────────────────
@@ -544,5 +625,101 @@ mod tests {
     fn kill_all_on_empty_children_does_not_panic() {
         let mut tp = make_tp(vec![]);
         tp.kill_all(); // should be a silent no-op
+    }
+
+    // ── LogOutput variant helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn log_output_off_is_not_verbose() {
+        let verbose = matches!(LogOutput::Off, LogOutput::Stream | LogOutput::Both(_));
+        assert!(!verbose);
+    }
+
+    #[test]
+    fn log_output_write_to_dir_is_not_verbose() {
+        let verbose = matches!(
+            LogOutput::WriteToDir(PathBuf::from("/tmp")),
+            LogOutput::Stream | LogOutput::Both(_)
+        );
+        assert!(!verbose);
+    }
+
+    #[test]
+    fn log_output_stream_is_verbose() {
+        let verbose = matches!(LogOutput::Stream, LogOutput::Stream | LogOutput::Both(_));
+        assert!(verbose);
+    }
+
+    #[test]
+    fn log_output_both_is_verbose() {
+        let verbose = matches!(
+            LogOutput::Both(PathBuf::from("/tmp")),
+            LogOutput::Stream | LogOutput::Both(_)
+        );
+        assert!(verbose);
+    }
+
+    #[test]
+    fn log_output_off_has_no_log_dir() {
+        let log_dir: Option<PathBuf> = match &LogOutput::Off {
+            LogOutput::WriteToDir(p) | LogOutput::Both(p) => Some(p.clone()),
+            _ => None,
+        };
+        assert!(log_dir.is_none());
+    }
+
+    #[test]
+    fn log_output_write_to_dir_extracts_path() {
+        let expected = PathBuf::from("/tmp/sim-logs");
+        let log_dir: Option<PathBuf> = match &LogOutput::WriteToDir(expected.clone()) {
+            LogOutput::WriteToDir(p) | LogOutput::Both(p) => Some(p.clone()),
+            _ => None,
+        };
+        assert_eq!(log_dir, Some(expected));
+    }
+
+    #[test]
+    fn log_output_both_extracts_path() {
+        let expected = PathBuf::from("/tmp/sim-logs");
+        let log_dir: Option<PathBuf> = match &LogOutput::Both(expected.clone()) {
+            LogOutput::WriteToDir(p) | LogOutput::Both(p) => Some(p.clone()),
+            _ => None,
+        };
+        assert_eq!(log_dir, Some(expected));
+    }
+
+    // ── pipe_to_file ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pipe_to_file_writes_lines_to_file() {
+        use std::io::Cursor;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.log");
+        // Pre-create so pipe_to_file's append open succeeds.
+        std::fs::File::create(&path).unwrap();
+
+        let content = b"line one\nline two\nline three\n";
+        pipe_to_file(Cursor::new(content), path.clone());
+
+        // Give the background thread time to finish.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("line one"), "missing 'line one' in {written:?}");
+        assert!(written.contains("line two"), "missing 'line two' in {written:?}");
+        assert!(written.contains("line three"), "missing 'line three' in {written:?}");
+    }
+
+    #[test]
+    fn file_create_truncates_existing_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stale.log");
+        std::fs::write(&path, "old sentinel content\n").unwrap();
+
+        // This is exactly what spawn_zephyr_rpc_server_with_socat does to clear logs.
+        std::fs::File::create(&path).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.is_empty(), "file should be empty after File::create, got {after:?}");
     }
 }

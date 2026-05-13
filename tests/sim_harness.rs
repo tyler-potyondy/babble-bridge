@@ -14,7 +14,7 @@ use babble_bridge::TestProcesses;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -156,8 +156,13 @@ fn start_sim(test_name: &str) -> (TestProcesses, SimUart) {
     once_cleanup_sockets();
 
     let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
+    let log = if cfg!(feature = "sim-log") {
+        babble_bridge::LogOutput::Stream
+    } else {
+        babble_bridge::LogOutput::Off
+    };
     let (processes, socket_path) =
-        babble_bridge::spawn_zephyr_rpc_server_with_socat(sockets_dir, test_name);
+        babble_bridge::spawn_zephyr_rpc_server_with_socat(sockets_dir, test_name, log);
     let uart = SimUart::connect(&socket_path);
     (processes, uart)
 }
@@ -255,4 +260,121 @@ fn downstream_usage_example() {
     println!("[Step 5] Server-side logs verified.");
 
     // `processes` drops here → kills PHY, zephyr_rpc_server_app, cgm, socat.
+}
+
+// =============================================================================
+// LogOutput integration tests
+// =============================================================================
+
+/// Spawn with `LogOutput::WriteToDir` and verify that `rpc-server.log` and
+/// `cgm.log` are created inside the directory and are non-empty after Zephyr
+/// finishes its RPC-server initialisation sequence.
+#[test]
+fn log_output_write_to_dir_creates_log_files() {
+    let log_dir = tempfile::tempdir().expect("tempdir");
+    let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
+    let log = babble_bridge::LogOutput::WriteToDir(log_dir.path().to_path_buf());
+
+    let (mut processes, _socket_path) =
+        babble_bridge::spawn_zephyr_rpc_server_with_socat(
+            sockets_dir,
+            "log_output_write_to_dir_creates_log_files",
+            log,
+        );
+
+    // Wait for Zephyr init so log files have meaningful content.
+    processes.search_stdout_for_strings(HashSet::from([
+        "<inf> nrf_ps_server: Initializing RPC server",
+    ]));
+
+    // Give background file-writer threads a moment to flush.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let rpc_log = log_dir.path().join("rpc-server.log");
+    let cgm_log = log_dir.path().join("cgm.log");
+    let phy_log = log_dir.path().join("phy.log");
+
+    assert!(rpc_log.exists(), "rpc-server.log not created");
+    assert!(cgm_log.exists(), "cgm.log not created");
+    assert!(phy_log.exists(), "phy.log not created");
+
+    let rpc_contents = std::fs::read_to_string(&rpc_log).unwrap();
+    assert!(
+        !rpc_contents.is_empty(),
+        "rpc-server.log is empty — Zephyr stdout was not forwarded"
+    );
+}
+
+/// Spawn once, drop processes, manually write a sentinel line to
+/// `rpc-server.log`, then spawn again with the same log directory.  The
+/// sentinel must be gone because `spawn_zephyr_rpc_server_with_socat` truncates
+/// log files at the start of every run.
+#[test]
+fn log_output_write_to_dir_clears_logs_on_respawn() {
+    let log_dir = tempfile::tempdir().expect("tempdir");
+    let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
+
+    // First spawn — just start and immediately kill.
+    {
+        let log = babble_bridge::LogOutput::WriteToDir(log_dir.path().to_path_buf());
+        let (_processes, _) = babble_bridge::spawn_zephyr_rpc_server_with_socat(
+            sockets_dir,
+            "log_output_clears_logs_respawn",
+            log,
+        );
+        // _processes drops here, killing all children.
+    }
+
+    // Inject sentinel into the log file left by the first run.
+    let rpc_log = log_dir.path().join("rpc-server.log");
+    std::fs::write(&rpc_log, "STALE_SENTINEL_FROM_PREVIOUS_RUN\n").unwrap();
+
+    // Second spawn with the same log directory.
+    {
+        let log = babble_bridge::LogOutput::WriteToDir(log_dir.path().to_path_buf());
+        let (mut processes, _) = babble_bridge::spawn_zephyr_rpc_server_with_socat(
+            sockets_dir,
+            "log_output_clears_logs_respawn",
+            log,
+        );
+        processes.search_stdout_for_strings(HashSet::from([
+            "<inf> nrf_ps_server: Initializing RPC server",
+        ]));
+    }
+
+    let contents = std::fs::read_to_string(&rpc_log).unwrap();
+    assert!(
+        !contents.contains("STALE_SENTINEL_FROM_PREVIOUS_RUN"),
+        "sentinel still present after respawn — log was not cleared:\n{contents}"
+    );
+}
+
+/// Spawn with `LogOutput::Off` and verify that no log files are written to a
+/// caller-provided temp directory (the spawn function should not touch it at all).
+#[test]
+fn log_output_off_creates_no_log_files() {
+    let log_dir = tempfile::tempdir().expect("tempdir");
+    let sockets_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets"));
+
+    let (mut processes, _) = babble_bridge::spawn_zephyr_rpc_server_with_socat(
+        sockets_dir,
+        "log_output_off_creates_no_log_files",
+        babble_bridge::LogOutput::Off,
+    );
+
+    processes.search_stdout_for_strings(HashSet::from([
+        "<inf> nrf_ps_server: Initializing RPC server",
+    ]));
+
+    let log_files: Vec<_> = std::fs::read_dir(log_dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "log").unwrap_or(false))
+        .collect();
+
+    assert!(
+        log_files.is_empty(),
+        "expected no .log files for LogOutput::Off, found: {:?}",
+        log_files.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
 }

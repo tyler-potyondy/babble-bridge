@@ -100,7 +100,15 @@ fn run() -> Result<()> {
                 let sim_dir = parse_sim_flag(&args, "--sim-dir")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("tests/sockets"));
-                cmd_start_sim(sim_id, &sim_dir)
+                let log_stream = args.iter().any(|a| a == "--log-stream");
+                let log_dir = parse_sim_flag(&args, "--log-dir").map(PathBuf::from);
+                let log = match (log_stream, log_dir) {
+                    (true, Some(dir)) => crate::LogOutput::Both(dir),
+                    (true, None) => crate::LogOutput::Stream,
+                    (false, Some(dir)) => crate::LogOutput::WriteToDir(dir),
+                    (false, None) => crate::LogOutput::Off,
+                };
+                cmd_start_sim(sim_id, &sim_dir, log)
             }
         }
         "stop-sim" => {
@@ -168,6 +176,10 @@ fn print_usage() {
     println!("    --sim-id <id>                   Simulation identifier (default: sim)");
     println!("    --sim-dir <path>                Directory for the socket file (default: <workspace>/tests/sockets)");
     println!("    --container                     Build image if needed and run inside a container (macOS)");
+    println!("    --log-stream                    Stream all process output to this terminal with [label] prefixes");
+    println!("    --log-dir <path>                Write each process's output to <path>/{{rpc-server,cgm,phy}}.log");
+    println!("                                    (logs are truncated at the start of each run; combine with");
+    println!("                                     --log-stream to both stream and write files simultaneously)");
     println!("    Prints the socket path on success.");
     println!();
     println!("  stop-sim                          Stop a running simulation (Linux only)");
@@ -782,7 +794,7 @@ fn parse_sim_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 /// Spawns PHY + `zephyr_rpc_server_app` + `cgm_peripheral_sample` + `socat`,
 /// waits until the UNIX socket at `<sim_dir>/<sim_id>.sock` is connectable,
 /// then prints the socket path and exits, leaving all child processes running.
-fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
+fn cmd_start_sim(sim_id: &str, sim_dir: &Path, log: crate::LogOutput) -> Result<()> {
     // Verify required binaries exist before attempting to spawn anything.
     let bsim_bin = Path::new("external/tools/bsim/bin");
     let required = ["bs_2G4_phy_v1", "zephyr_rpc_server_app", "cgm_peripheral_sample"];
@@ -802,7 +814,7 @@ fn cmd_start_sim(sim_id: &str, sim_dir: &Path) -> Result<()> {
     }
 
     let (processes, socket_path) =
-        crate::spawn_zephyr_rpc_server_with_socat(sim_dir, sim_id);
+        crate::spawn_zephyr_rpc_server_with_socat(sim_dir, sim_id, log);
 
     // Wait until socat is actually listening on the socket before we exit.
     // socat needs a moment after spawning before it accepts connections.
